@@ -1,0 +1,19 @@
+{
+  "name": "Loxy Private Pack",
+  "version": "1.2.0",
+  "minecraft_version": "1.21.1",
+  "loader": "fabric",
+  "loader_version": "0.16.9",
+  "server_host": "play.loxy.gg",
+  "server_port": 25565,
+  "mrpack_url": "https://github.com/loxy-community/modpack-manifest/releases/download/v1.2.0/loxy-pack-1.2.0.mrpack",
+  "mrpack_sha256": null,
+  "files": [
+    {
+      "path": "config/loxy-custom.toml",
+      "url": "https://raw.githubusercontent.com/loxy-community/modpack-manifest/main/overrides/config/loxy-custom.toml",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "news": "Update v1.2.0 is live! Added Sodium, Lithium, and custom server resourcepacks. Click UPDATE & PLAY to automatically verify hashes and launch."
+}
