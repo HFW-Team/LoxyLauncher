@@ -8,6 +8,7 @@
   import type {
     LauncherConfig,
     SystemMemoryInfo,
+    DetectedJava,
     InitialStateResponse,
     DashboardStatus,
     ManifestCheckResult,
@@ -16,6 +17,8 @@
     SyncProgressEvent,
     GameLogEntry,
     GameExitEvent,
+    ModrinthSearchHit,
+    InstalledModEntry,
   } from "./lib/types";
 
   // Reactive Application State
@@ -32,8 +35,11 @@
     fullscreen: false,
     close_behavior: "hide_and_reopen",
     discord_rpc_enabled: true,
+    keep_user_mods: true,
     manifest_url:
       "https://raw.githubusercontent.com/loxy-community/modpack-manifest/main/launcher-manifest.json",
+    server_host: "play.loxy.gg",
+    server_port: 25565,
     azure_client_id: "00000000441cc96b",
     account: null,
   });
@@ -42,6 +48,8 @@
     total_ram_mb: 16384,
     recommended_max_mb: 6144,
   });
+
+  let detectedJavas = $state<DetectedJava[]>([]);
 
   let manifestCheck = $state<ManifestCheckResult>({
     manifest: {
@@ -90,6 +98,15 @@
   let logFilter = $state<"ALL" | "INFO" | "WARN" | "ERROR">("ALL");
   let logsCopied = $state(false);
 
+  // Modrinth Browser & Installed Mods State
+  let modsTab = $state<"browse" | "installed">("browse");
+  let modSearchQuery = $state("");
+  let modSearchResults = $state<ModrinthSearchHit[]>([]);
+  let isSearchingMods = $state(false);
+  let installingProjectIds = $state<Record<string, boolean>>({});
+  let installedMods = $state<InstalledModEntry[]>([]);
+  let modsModalNotice = $state<string | null>(null);
+
   // Updater State
   let updaterState = $state<string>("v0.1.0");
 
@@ -97,6 +114,8 @@
   let authDialog: HTMLDialogElement | undefined = $state();
   let settingsDialog: HTMLDialogElement | undefined = $state();
   let consoleDialog: HTMLDialogElement | undefined = $state();
+  let ramDialog: HTMLDialogElement | undefined = $state();
+  let modsDialog: HTMLDialogElement | undefined = $state();
 
   let filteredLogs = $derived(
     logFilter === "ALL" ? logs : logs.filter((l) => l.level === logFilter)
@@ -132,12 +151,15 @@
     attachDialogLightDismissFallback(authDialog);
     attachDialogLightDismissFallback(settingsDialog);
     attachDialogLightDismissFallback(consoleDialog);
+    attachDialogLightDismissFallback(ramDialog);
+    attachDialogLightDismissFallback(modsDialog);
 
     (async () => {
       try {
         const init = await invoke<InitialStateResponse>("get_initial_state");
         config = init.config;
         systemMemory = init.system_memory;
+        detectedJavas = init.detected_javas ?? [];
 
         const existingLogs = await invoke<GameLogEntry[]>("get_game_logs");
         logs = existingLogs;
@@ -298,9 +320,10 @@
       });
       config = saved;
       settingsDialog?.close();
+      ramDialog?.close();
       statusBanner = {
         type: "info",
-        text: "Settings saved. Refreshing modpack manifest...",
+        text: "Configuration saved.",
       };
       await refreshManifestAndServer();
     } catch (err) {
@@ -308,6 +331,74 @@
         type: "error",
         text: `Failed to save settings: ${String(err)}`,
       };
+    }
+  }
+
+  async function openModsModal() {
+    modsModalNotice = null;
+    modsDialog?.showModal();
+    await loadInstalledMods();
+    if (modSearchResults.length === 0) {
+      await handleSearchModrinth();
+    }
+  }
+
+  async function loadInstalledMods() {
+    try {
+      installedMods = await invoke<InstalledModEntry[]>("get_installed_mods");
+    } catch (err) {
+      modsModalNotice = `Could not list mods: ${String(err)}`;
+    }
+  }
+
+  async function handleSearchModrinth(e?: Event) {
+    if (e) e.preventDefault();
+    isSearchingMods = true;
+    modsModalNotice = null;
+    try {
+      modSearchResults = await invoke<ModrinthSearchHit[]>("search_mods_on_modrinth", {
+        query: modSearchQuery,
+        mcVersion: manifestCheck.manifest.minecraft_version,
+        loader: manifestCheck.manifest.loader,
+      });
+    } catch (err) {
+      modsModalNotice = `Modrinth search error: ${String(err)}`;
+    } finally {
+      isSearchingMods = false;
+    }
+  }
+
+  async function handleInstallModrinthMod(hit: ModrinthSearchHit) {
+    installingProjectIds = { ...installingProjectIds, [hit.project_id]: true };
+    modsModalNotice = null;
+    try {
+      // Automatically ensure keep_user_mods is enabled when installing custom mods
+      if (!config.keep_user_mods) {
+        config.keep_user_mods = true;
+        await invoke("save_launcher_config", { newConfig: config });
+      }
+      const installed = await invoke<InstalledModEntry>("install_mod_from_modrinth", {
+        projectId: hit.project_id,
+        mcVersion: manifestCheck.manifest.minecraft_version,
+        loader: manifestCheck.manifest.loader,
+      });
+      modsModalNotice = `Installed ${hit.title} (${installed.filename})`;
+      await loadInstalledMods();
+    } catch (err) {
+      modsModalNotice = `Failed to install ${hit.title}: ${String(err)}`;
+    } finally {
+      installingProjectIds = { ...installingProjectIds, [hit.project_id]: false };
+    }
+  }
+
+  async function handleManageInstalledMod(filename: string, deleteMod: boolean) {
+    try {
+      installedMods = await invoke<InstalledModEntry[]>("manage_installed_mod", {
+        filename,
+        delete: deleteMod,
+      });
+    } catch (err) {
+      modsModalNotice = `Mod action failed: ${String(err)}`;
     }
   }
 
@@ -437,13 +528,13 @@
       </div>
       <div>
         <div class="flex items-center gap-2">
-          <h1 class="font-mc-title text-base tracking-wider text-[#66bb6a]">
+          <h1 class="font-mc-title text-lg tracking-wider text-[#66bb6a]">
             LOXYLAUNCHER
           </h1>
           <button
             type="button"
             onclick={checkForLauncherUpdate}
-            class="px-2 py-0.5 text-[11px] bg-[#1d1d1d] border border-[#444] text-[#aaa] hover:text-white cursor-pointer"
+            class="px-2 py-0.5 text-xs bg-[#1d1d1d] border border-[#444] text-[#aaa] hover:text-white cursor-pointer"
             title="Click to check for launcher updates"
           >
             {updaterState}
@@ -456,7 +547,7 @@
     </div>
 
     <!-- Account & Actions -->
-    <div class="flex items-center gap-3">
+    <div class="flex items-center gap-2.5">
       {#if config.account}
         <div class="mc-inset px-3 py-1.5 flex items-center gap-2.5">
           <img
@@ -468,12 +559,12 @@
             <div class="text-xs text-[#a5d6a7] font-bold leading-tight">
               {config.account.username}
             </div>
-            <div class="text-[10px] text-[#888]">Microsoft Account</div>
+            <div class="text-[11px] text-[#888]">Microsoft Account</div>
           </div>
           <button
             type="button"
             onclick={handleLogout}
-            class="mc-btn mc-btn-red px-2 py-1 text-[10px] ml-1"
+            class="mc-btn mc-btn-red px-2 py-1 text-xs ml-1"
             title="Sign out"
           >
             LOGOUT
@@ -491,12 +582,21 @@
 
       <button
         type="button"
+        onclick={openModsModal}
+        class="mc-btn px-3 py-2 text-xs"
+        title="Search Modrinth & Manage Installed Mods"
+      >
+        <span>MODS</span>
+      </button>
+
+      <button
+        type="button"
         onclick={() => consoleDialog?.showModal()}
         class="mc-btn px-3 py-2 text-xs"
       >
         <span>CONSOLE</span>
         {#if errorCount > 0}
-          <span class="px-1.5 py-0.2 bg-[#d32f2f] text-white text-[10px]">
+          <span class="px-1.5 py-0.2 bg-[#d32f2f] text-white text-xs">
             {errorCount}
           </span>
         {/if}
@@ -544,7 +644,7 @@
       <section class="mc-panel p-4 flex flex-col gap-3">
         <div class="flex items-start justify-between">
           <div>
-            <span class="text-[11px] uppercase tracking-widest text-[#81c784]">
+            <span class="text-xs uppercase tracking-widest text-[#81c784]">
               Featured Private Pack
             </span>
             <h2 class="font-mc-title text-xl text-white mt-1">
@@ -552,14 +652,23 @@
             </h2>
           </div>
 
-          <button
-            type="button"
-            onclick={refreshManifestAndServer}
-            disabled={isRefreshing || isLaunching}
-            class="mc-btn px-2.5 py-1 text-xs"
-          >
-            {isRefreshing ? "SYNCING..." : "CHECK UPDATES"}
-          </button>
+          <div class="flex gap-2">
+            <button
+              type="button"
+              onclick={openModsModal}
+              class="mc-btn px-2.5 py-1 text-xs"
+            >
+              + ADD MODS
+            </button>
+            <button
+              type="button"
+              onclick={refreshManifestAndServer}
+              disabled={isRefreshing || isLaunching}
+              class="mc-btn px-2.5 py-1 text-xs"
+            >
+              {isRefreshing ? "SYNCING..." : "CHECK UPDATES"}
+            </button>
+          </div>
         </div>
 
         <!-- Badges Row -->
@@ -595,29 +704,25 @@
           <h3 class="text-xs font-bold uppercase tracking-wider text-[#b0bec5]">
             Server News & Modpack Notes
           </h3>
-          <span class="text-[11px] text-[#777]">
-            SHA-1 / SHA-256 + .mrpack Verified
+          <span class="text-xs text-[#888]">
+            {config.keep_user_mods ? "User Mods Allowed" : "Strict Pack Sync"}
           </span>
         </div>
 
-        <div class="mc-inset p-3.5 flex-1 overflow-y-auto text-xs leading-relaxed text-[#d0d0d0] space-y-2">
+        <div class="mc-inset p-3.5 flex-1 overflow-y-auto text-sm leading-relaxed text-[#dedede] space-y-2 whitespace-pre-line">
           <p>
             {manifestCheck.manifest.news ??
               "No announcement posted in the remote manifest."}
           </p>
-          <div class="pt-3 border-t border-[#262626] text-[11px] text-[#888] space-y-1">
+          <div class="pt-3 border-t border-[#262626] text-xs text-[#999] space-y-1">
             <div>
-              <strong class="text-[#aaa]">Remote Source:</strong>
+              <strong class="text-[#bbb]">Remote Source:</strong>
               {manifestCheck.manifest.mrpack_url
-                ? "Modrinth .mrpack + Remote JSON Manifest"
+                ? "Modrinth .mrpack + Parallel SHA Verification"
                 : "Remote JSON Hash Manifest"}
             </div>
-            <div>
-              <strong class="text-[#aaa]">Tracked Custom Overrides:</strong>
-              {manifestCheck.manifest.files.length} file(s)
-            </div>
             <div class="truncate" title={config.instance_dir}>
-              <strong class="text-[#aaa]">Instance Path:</strong>
+              <strong class="text-[#bbb]">Instance Path:</strong>
               {config.instance_dir}
             </div>
           </div>
@@ -644,7 +749,7 @@
             type="button"
             onclick={pingServerOnly}
             disabled={isRefreshing}
-            class="mc-btn px-2 py-0.5 text-[11px]"
+            class="mc-btn px-2.5 py-0.5 text-xs"
           >
             PING
           </button>
@@ -656,18 +761,18 @@
             <span class="text-[#fff] font-bold truncate">
               {manifestCheck.manifest.server_host}:{manifestCheck.manifest.server_port}
             </span>
-            <span class="text-[#81c784] text-[11px]">
+            <span class="text-[#81c784] text-xs">
               {serverStatus.latency_ms != null ? `${serverStatus.latency_ms} ms` : "---"}
             </span>
           </div>
 
-          <p class="font-mc-mono text-base text-[#bdbdbd] leading-snug">
+          <p class="font-mc-mono text-sm text-[#bdbdbd] leading-snug">
             {serverStatus.motd}
           </p>
 
           <!-- Player Count Bar -->
           <div class="pt-1">
-            <div class="flex justify-between text-[11px] text-[#aaa] mb-1">
+            <div class="flex justify-between text-xs text-[#aaa] mb-1">
               <span>PLAYERS ONLINE</span>
               <span class="text-white font-bold">
                 {serverStatus.players_online} / {serverStatus.players_max}
@@ -706,100 +811,410 @@
           Client Profile Configuration
         </h3>
 
-        <div class="grid grid-cols-2 gap-2 text-xs my-auto">
-          <div class="mc-inset p-2.5">
-            <div class="text-[10px] text-[#888]">ALLOCATED RAM</div>
+        <div class="grid grid-cols-2 gap-2.5 text-xs my-auto">
+          <!-- CLICKABLE ALLOCATED RAM CONTAINER -->
+          <button
+            type="button"
+            onclick={() => ramDialog?.showModal()}
+            class="mc-inset p-2.5 text-left hover:border-[#66bb6a] cursor-pointer transition-colors group"
+            title="Click to adjust Allocated RAM"
+          >
+            <div class="flex items-center justify-between text-[11px] text-[#999] group-hover:text-[#a5d6a7]">
+              <span>ALLOCATED RAM</span>
+              <span class="underline">EDIT</span>
+            </div>
             <div class="text-sm text-[#66bb6a] font-bold mt-0.5">
               {config.max_ram_mb} MB
             </div>
-          </div>
+          </button>
 
-          <div class="mc-inset p-2.5">
-            <div class="text-[10px] text-[#888]">JAVA RUNTIME</div>
-            <div class="text-sm text-[#4fc3f7] font-bold mt-0.5">
-              {config.java_path ? "Custom JRE" : "Auto Adoptium"}
+          <button
+            type="button"
+            onclick={() => settingsDialog?.showModal()}
+            class="mc-inset p-2.5 text-left hover:border-[#4fc3f7] cursor-pointer transition-colors"
+            title="Click to configure Java runtime"
+          >
+            <div class="text-[11px] text-[#999]">JAVA RUNTIME</div>
+            <div class="text-sm text-[#4fc3f7] font-bold mt-0.5 truncate">
+              {config.java_path
+                ? "Custom JDK"
+                : detectedJavas.length > 0
+                  ? `System JDK (${detectedJavas.length})`
+                  : "Auto JRE"}
             </div>
-          </div>
+          </button>
 
-          <div class="mc-inset p-2.5">
-            <div class="text-[10px] text-[#888]">DISPLAY</div>
+          <button
+            type="button"
+            onclick={() => settingsDialog?.showModal()}
+            class="mc-inset p-2.5 text-left hover:border-white cursor-pointer transition-colors"
+            title="Click to change resolution"
+          >
+            <div class="text-[11px] text-[#999]">DISPLAY</div>
             <div class="text-sm text-white font-bold mt-0.5">
               {config.fullscreen
                 ? "Fullscreen"
                 : `${config.resolution_width}x${config.resolution_height}`}
             </div>
-          </div>
+          </button>
 
-          <div class="mc-inset p-2.5">
-            <div class="text-[10px] text-[#888]">DISCORD RPC</div>
+          <button
+            type="button"
+            onclick={openModsModal}
+            class="mc-inset p-2.5 text-left hover:border-[#ce93d8] cursor-pointer transition-colors"
+            title="Click to manage user mods"
+          >
+            <div class="text-[11px] text-[#999]">USER MODS</div>
             <div class="text-sm text-[#ce93d8] font-bold mt-0.5">
-              {config.discord_rpc_enabled ? "ACTIVE" : "DISABLED"}
+              {config.keep_user_mods ? "ALLOWED" : "LOCKED"}
             </div>
-          </div>
+          </button>
         </div>
       </section>
     </div>
   </main>
 
-  <!-- BOTTOM DIRT LAUNCH DECK -->
-  <footer class="mc-dirt-bar px-6 py-4 flex items-center justify-between gap-6">
-    <!-- Sync / Hash Progress Status -->
-    <div class="flex-1">
+  <!-- BOTTOM DIRT LAUNCH DECK WITH CENTERED PLAY BUTTON -->
+  <footer class="mc-dirt-bar px-6 py-3.5 grid grid-cols-3 items-center gap-4">
+    <!-- Left Column: Sync / Hash Progress Status -->
+    <div class="min-w-0">
       {#if syncProgress}
-        <div class="flex justify-between text-xs mb-1.5">
-          <span class="text-[#a5d6a7] font-bold">{syncProgress.stage}</span>
-          <span class="text-white">{syncProgress.percent}%</span>
+        <div class="flex justify-between text-xs mb-1">
+          <span class="text-[#a5d6a7] font-bold truncate">{syncProgress.stage}</span>
+          <span class="text-white ml-2">{syncProgress.percent}%</span>
         </div>
-        <div class="w-full h-5 mc-inset p-0.5">
+        <div class="w-full h-4 mc-inset p-0.5">
           <div
             class="h-full bg-[#43a047] transition-all duration-150"
             style={`width: ${syncProgress.percent}%`}
           ></div>
         </div>
-        <div class="text-[11px] text-[#bdbdbd] mt-1 truncate">
-          {syncProgress.current_file} ({syncProgress.completed}/{syncProgress.total})
+        <div class="text-xs text-[#bdbdbd] mt-1 truncate">
+          {syncProgress.current_file}
         </div>
       {:else}
-        <div class="flex items-center gap-3">
-          <div class="w-3 h-3 bg-[#66bb6a] border border-black"></div>
-          <div>
-            <div class="text-xs font-bold text-white">
+        <div class="flex items-center gap-2.5">
+          <div class="w-3 h-3 bg-[#66bb6a] border border-black shrink-0"></div>
+          <div class="truncate">
+            <div class="text-xs font-bold text-white truncate">
               {manifestCheck.update_available
-                ? `Update v${manifestCheck.manifest.version} Ready to Sync`
-                : `${manifestCheck.manifest.name} Ready to Launch`}
+                ? `Update v${manifestCheck.manifest.version} Ready`
+                : `${manifestCheck.manifest.name} Ready`}
             </div>
-            <div class="text-[11px] text-[#aaa]">
+            <div class="text-xs text-[#aaa] truncate">
               {config.account
-                ? `Authenticated as ${config.account.username} • Auto-sync enabled`
-                : "Sign in with Microsoft OAuth to launch"}
+                ? `Signed in as ${config.account.username}`
+                : "Sign in with Microsoft to play"}
             </div>
           </div>
         </div>
       {/if}
     </div>
 
-    <!-- Giant Minecraft Play Button -->
-    <button
-      type="button"
-      onclick={handlePlay}
-      disabled={isLaunching}
-      class="mc-btn mc-btn-green px-10 py-4 text-sm font-mc-title tracking-wider shrink-0"
-    >
-      {#if isLaunching}
-        <span>LAUNCHING...</span>
-      {:else if !config.account}
-        <span>SIGN IN & PLAY</span>
-      {:else if manifestCheck.update_available}
-        <span>UPDATE & PLAY</span>
-      {:else}
-        <span>PLAY MODPACK</span>
-      {/if}
-    </button>
+    <!-- Center Column: Centered Giant Minecraft Play Button -->
+    <div class="flex justify-center">
+      <button
+        type="button"
+        onclick={handlePlay}
+        disabled={isLaunching}
+        class="mc-btn mc-btn-green px-12 py-3.5 text-base font-mc-title tracking-wider"
+      >
+        {#if isLaunching}
+          <span>LAUNCHING...</span>
+        {:else if !config.account}
+          <span>SIGN IN & PLAY</span>
+        {:else if manifestCheck.update_available}
+          <span>UPDATE & PLAY</span>
+        {:else}
+          <span>PLAY</span>
+        {/if}
+      </button>
+    </div>
+
+    <!-- Right Column: Quick RAM & Mods Indicators -->
+    <div class="flex items-center justify-end gap-2 text-xs text-[#bdbdbd]">
+      <button
+        type="button"
+        onclick={() => ramDialog?.showModal()}
+        class="mc-btn px-3 py-1.5 text-xs"
+      >
+        RAM: {config.max_ram_mb} MB
+      </button>
+      <button
+        type="button"
+        onclick={openModsModal}
+        class="mc-btn px-3 py-1.5 text-xs"
+      >
+        MODRINTH MODS
+      </button>
+    </div>
   </footer>
 </div>
 
 <!-- ========================================================================= -->
-<!-- NATIVE MODAL 1: MICROSOFT DEVICE CODE OAUTH DIALOG                        -->
+<!-- NATIVE MODAL 1: QUICK RAM ALLOCATION SLIDER DIALOG                        -->
+<!-- ========================================================================= -->
+<dialog
+  bind:this={ramDialog}
+  {...({ closedby: "any" } as any)}
+  aria-labelledby="ram-dialog-title"
+  class="mc-panel w-[460px] p-5 text-white"
+>
+  <div class="flex items-center justify-between border-b-2 border-[#181818] pb-3 mb-4">
+    <h2 id="ram-dialog-title" class="font-mc-title text-base text-[#66bb6a]">
+      ADJUST ALLOCATED RAM
+    </h2>
+    <form method="dialog">
+      <button type="submit" class="mc-btn px-2.5 py-1 text-xs">X</button>
+    </form>
+  </div>
+
+  <div class="mc-inset p-4 space-y-4 text-sm">
+    <div class="flex justify-between items-center">
+      <span class="text-[#a5d6a7] font-bold">Maximum JVM Heap (-Xmx)</span>
+      <span class="text-base font-bold text-white">
+        {config.max_ram_mb} MB ({(config.max_ram_mb / 1024).toFixed(1)} GB)
+      </span>
+    </div>
+
+    <input
+      type="range"
+      min="2048"
+      max={systemMemory.total_ram_mb}
+      step="512"
+      bind:value={config.max_ram_mb}
+      aria-label="Maximum Memory Allocation Slider"
+      class="mc-slider w-full"
+    />
+
+    <div class="flex justify-between text-xs text-[#999]">
+      <span>2048 MB</span>
+      <span>Recommended: {systemMemory.recommended_max_mb} MB</span>
+      <span>Max: {systemMemory.total_ram_mb} MB</span>
+    </div>
+
+    <!-- Quick Presets -->
+    <div class="pt-2 flex flex-wrap gap-2">
+      {#each [4096, 6144, 8192, 12288, 16384].filter((v) => v <= systemMemory.total_ram_mb) as preset}
+        <button
+          type="button"
+          onclick={() => (config.max_ram_mb = preset)}
+          class="mc-btn px-3 py-1 text-xs {config.max_ram_mb === preset
+            ? 'mc-btn-green'
+            : ''}"
+        >
+          {preset / 1024} GB
+        </button>
+      {/each}
+    </div>
+  </div>
+
+  <div class="mt-4 pt-3 border-t-2 border-[#181818] flex justify-end gap-2">
+    <form method="dialog">
+      <button type="submit" class="mc-btn px-4 py-1.5 text-xs">CANCEL</button>
+    </form>
+    <button
+      type="button"
+      onclick={handleSaveSettings}
+      class="mc-btn mc-btn-green px-5 py-1.5 text-xs font-bold"
+    >
+      APPLY RAM
+    </button>
+  </div>
+</dialog>
+
+<!-- ========================================================================= -->
+<!-- NATIVE MODAL 2: MODRINTH MOD BROWSER & INSTALLED MODS MANAGER             -->
+<!-- ========================================================================= -->
+<dialog
+  bind:this={modsDialog}
+  {...({ closedby: "any" } as any)}
+  aria-labelledby="mods-dialog-title"
+  class="mc-panel w-[760px] p-5 text-white"
+>
+  <div class="flex items-center justify-between border-b-2 border-[#181818] pb-3 mb-3">
+    <div>
+      <h2 id="mods-dialog-title" class="font-mc-title text-base text-[#66bb6a]">
+        MODRINTH MOD BROWSER & INSTANCE MODS
+      </h2>
+      <p class="text-xs text-[#aaa]">
+        Targeting Minecraft <strong class="text-[#4fc3f7]">{manifestCheck.manifest.minecraft_version}</strong>
+        • Loader: <strong class="text-[#ce93d8] uppercase">{manifestCheck.manifest.loader}</strong>
+      </p>
+    </div>
+
+    <div class="flex items-center gap-2">
+      <button
+        type="button"
+        onclick={() => (modsTab = "browse")}
+        class="mc-btn px-3 py-1.5 text-xs {modsTab === 'browse' ? 'mc-btn-green' : ''}"
+      >
+        SEARCH MODRINTH
+      </button>
+      <button
+        type="button"
+        onclick={() => {
+          modsTab = "installed";
+          loadInstalledMods();
+        }}
+        class="mc-btn px-3 py-1.5 text-xs {modsTab === 'installed' ? 'mc-btn-green' : ''}"
+      >
+        INSTALLED ({installedMods.length})
+      </button>
+      <form method="dialog">
+        <button type="submit" class="mc-btn px-2.5 py-1 text-xs ml-1">X</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Keep User Mods Setting Bar -->
+  <div class="mc-inset px-3.5 py-2 mb-3 flex items-center justify-between text-xs">
+    <label class="flex items-center gap-2 cursor-pointer">
+      <input
+        type="checkbox"
+        bind:checked={config.keep_user_mods}
+        onchange={() => invoke("save_launcher_config", { newConfig: config })}
+      />
+      <span class="font-bold text-[#a5d6a7]">
+        Allow user-installed mods (preserve custom mods in mods/ folder during pack sync)
+      </span>
+    </label>
+  </div>
+
+  {#if modsModalNotice}
+    <div class="mc-inset px-3 py-2 mb-3 text-xs text-[#fde68a] border border-[#f59e0b]">
+      {modsModalNotice}
+    </div>
+  {/if}
+
+  {#if modsTab === "browse"}
+    <!-- Modrinth Search Bar -->
+    <form onsubmit={handleSearchModrinth} class="flex gap-2 mb-3">
+      <input
+        type="text"
+        placeholder="Search mods on Modrinth (e.g. Sodium, Iris, Journeymap, Zoomify)..."
+        bind:value={modSearchQuery}
+        class="flex-1 bg-[#121212] border-2 border-[#444] px-3 py-2 text-sm text-white"
+      />
+      <button
+        type="submit"
+        disabled={isSearchingMods}
+        class="mc-btn mc-btn-green px-5 py-2 text-xs font-bold"
+      >
+        {isSearchingMods ? "SEARCHING..." : "SEARCH"}
+      </button>
+    </form>
+
+    <!-- Search Results List -->
+    <div class="mc-inset p-3 h-[370px] overflow-y-auto space-y-2.5">
+      {#if isSearchingMods}
+        <div class="text-center py-12 text-sm text-[#aaa]">
+          Querying Modrinth API v2 for compatible {manifestCheck.manifest.loader} {manifestCheck.manifest.minecraft_version} mods...
+        </div>
+      {:else if modSearchResults.length === 0}
+        <div class="text-center py-12 text-sm text-[#888]">
+          No mods found matching your query for MC {manifestCheck.manifest.minecraft_version} ({manifestCheck.manifest.loader}).
+        </div>
+      {:else}
+        {#each modSearchResults as hit}
+          <div class="bg-[#1c1c1c] border border-[#333] p-3 flex items-center justify-between gap-3">
+            <div class="flex items-center gap-3 min-w-0">
+              {#if hit.icon_url}
+                <img
+                  src={hit.icon_url}
+                  alt={hit.title}
+                  class="w-11 h-11 bg-[#111] border border-black shrink-0 object-cover"
+                />
+              {:else}
+                <div class="w-11 h-11 bg-[#111] border border-black shrink-0 flex items-center justify-center text-xs text-[#666]">
+                  MOD
+                </div>
+              {/if}
+              <div class="min-w-0">
+                <div class="flex items-center gap-2">
+                  <span class="font-bold text-sm text-white truncate">{hit.title}</span>
+                  <span class="text-xs text-[#888]">by {hit.author}</span>
+                </div>
+                <p class="text-xs text-[#bdbdbd] line-clamp-2 mt-0.5">
+                  {hit.description}
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              disabled={installingProjectIds[hit.project_id]}
+              onclick={() => handleInstallModrinthMod(hit)}
+              class="mc-btn mc-btn-green px-3.5 py-2 text-xs shrink-0"
+            >
+              {installingProjectIds[hit.project_id] ? "INSTALLING..." : "+ INSTALL"}
+            </button>
+          </div>
+        {/each}
+      {/if}
+    </div>
+  {:else}
+    <!-- Installed Mods List -->
+    <div class="mc-inset p-3 h-[420px] overflow-y-auto space-y-2">
+      {#if installedMods.length === 0}
+        <div class="text-center py-12 text-sm text-[#888]">
+          No mods found in {config.instance_dir}/mods yet.
+        </div>
+      {:else}
+        {#each installedMods as mod}
+          <div class="bg-[#1c1c1c] border border-[#333] px-3 py-2.5 flex items-center justify-between gap-3">
+            <div class="min-w-0">
+              <div class="flex items-center gap-2">
+                <span class="text-sm font-bold {mod.enabled ? 'text-white' : 'text-[#777] line-through'} truncate">
+                  {mod.filename}
+                </span>
+                {#if mod.is_user_mod}
+                  <span class="px-1.5 py-0.5 text-[10px] bg-[#1b5e20] text-[#a5d6a7] border border-[#388e3c]">
+                    USER ADDED
+                  </span>
+                {:else}
+                  <span class="px-1.5 py-0.5 text-[10px] bg-[#263238] text-[#90caf9] border border-[#37474f]">
+                    MODPACK
+                  </span>
+                {/if}
+              </div>
+              <div class="text-xs text-[#888]">{mod.size_kb} KB</div>
+            </div>
+
+            <div class="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onclick={() => handleManageInstalledMod(mod.filename, false)}
+                class="mc-btn px-2.5 py-1 text-xs"
+              >
+                {mod.enabled ? "DISABLE" : "ENABLE"}
+              </button>
+              <button
+                type="button"
+                onclick={() => handleManageInstalledMod(mod.filename, true)}
+                class="mc-btn mc-btn-red px-2.5 py-1 text-xs"
+              >
+                DELETE
+              </button>
+            </div>
+          </div>
+        {/each}
+      {/if}
+    </div>
+  {/if}
+
+  <div class="mt-4 pt-3 border-t-2 border-[#181818] flex justify-end">
+    <form method="dialog">
+      <!-- svelte-ignore a11y_autofocus -->
+      <button type="submit" class="mc-btn px-4 py-1.5 text-xs" autofocus>
+        CLOSE
+      </button>
+    </form>
+  </div>
+</dialog>
+
+<!-- ========================================================================= -->
+<!-- NATIVE MODAL 3: MICROSOFT DEVICE CODE OAUTH DIALOG                        -->
 <!-- ========================================================================= -->
 <dialog
   bind:this={authDialog}
@@ -808,7 +1223,7 @@
   class="mc-panel w-[500px] p-5 text-white"
 >
   <div class="flex items-center justify-between border-b-2 border-[#181818] pb-3 mb-4">
-    <h2 id="auth-dialog-title" class="font-mc-title text-sm text-[#ffd54f]">
+    <h2 id="auth-dialog-title" class="font-mc-title text-base text-[#ffd54f]">
       MICROSOFT ACCOUNT SIGN IN
     </h2>
     <form method="dialog">
@@ -816,7 +1231,7 @@
     </form>
   </div>
 
-  <div class="space-y-4 text-xs">
+  <div class="space-y-4 text-sm">
     <p class="text-[#d0d0d0] leading-relaxed">
       LoxyLauncher uses official Microsoft Device Code authentication. Enter the
       code below at <strong class="text-[#4fc3f7]">microsoft.com/link</strong> to
@@ -825,7 +1240,7 @@
 
     {#if deviceCodeInfo}
       <div class="mc-inset p-4 text-center space-y-2">
-        <div class="text-[11px] text-[#aaa]">YOUR VERIFICATION CODE</div>
+        <div class="text-xs text-[#aaa]">YOUR VERIFICATION CODE</div>
         <div class="font-mc-title text-2xl tracking-widest text-[#66bb6a] select-all py-1">
           {deviceCodeInfo.user_code}
         </div>
@@ -841,7 +1256,7 @@
       </div>
 
       {#if isAuthPolling}
-        <div class="flex items-center justify-center gap-2 text-[#81c784] py-2">
+        <div class="flex items-center justify-center gap-2 text-[#81c784] py-2 text-xs">
           <span class="animate-pulse">●</span>
           <span>Waiting for you to complete login in browser...</span>
         </div>
@@ -853,7 +1268,7 @@
     {/if}
 
     {#if authError}
-      <div class="mc-inset p-3.5 border border-[#ef5350] text-[#ffcdd2] space-y-2">
+      <div class="mc-inset p-3.5 border border-[#ef5350] text-[#ffcdd2] space-y-2 text-xs">
         <div class="font-bold text-[#ef5350]">AUTHENTICATION NOTICE</div>
         <p class="leading-relaxed select-text">{authError}</p>
         <div class="pt-1 flex gap-2">
@@ -865,7 +1280,7 @@
             }}
             class="mc-btn px-3 py-1.5 text-xs"
           >
-            CONFIGURE CLIENT ID IN SETTINGS
+            OPEN SETTINGS
           </button>
         </div>
       </div>
@@ -883,16 +1298,16 @@
 </dialog>
 
 <!-- ========================================================================= -->
-<!-- NATIVE MODAL 2: LAUNCHER SETTINGS DIALOG                                  -->
+<!-- NATIVE MODAL 4: LAUNCHER SETTINGS DIALOG                                  -->
 <!-- ========================================================================= -->
 <dialog
   bind:this={settingsDialog}
   {...({ closedby: "any" } as any)}
   aria-labelledby="settings-dialog-title"
-  class="mc-panel w-[680px] p-5 text-white"
+  class="mc-panel w-[700px] p-5 text-white"
 >
   <div class="flex items-center justify-between border-b-2 border-[#181818] pb-3 mb-4">
-    <h2 id="settings-dialog-title" class="font-mc-title text-sm text-[#66bb6a]">
+    <h2 id="settings-dialog-title" class="font-mc-title text-base text-[#66bb6a]">
       LAUNCHER & MODPACK SETTINGS
     </h2>
     <form method="dialog">
@@ -900,11 +1315,65 @@
     </form>
   </div>
 
-  <div class="space-y-4 overflow-y-auto max-h-[68vh] pr-1 text-xs">
+  <div class="space-y-4 overflow-y-auto max-h-[68vh] pr-1 text-sm">
+    <!-- MODPACK SOURCE (MODRINTH / .MRPACK / MANIFEST) & SERVER IP -->
+    <div class="mc-inset p-3.5 space-y-3">
+      <div>
+        <label for="manifest-url-input" class="font-bold text-[#66bb6a] block mb-1 text-xs">
+          MODPACK SOURCE (MODRINTH SLUG, MODRINTH URL, .MRPACK URL, OR MANIFEST JSON)
+        </label>
+        <input
+          id="manifest-url-input"
+          type="text"
+          placeholder="e.g. fabulously-optimized or https://modrinth.com/modpack/your-pack"
+          bind:value={config.manifest_url}
+          class="w-full bg-[#1b1b1b] border border-[#444] px-2.5 py-1.5 text-white font-mc-mono text-sm"
+        />
+        <div class="text-xs text-[#9e9e9e] mt-1.5 space-y-0.5">
+          <div>• <strong>Modrinth Pack:</strong> Enter slug (<code class="text-[#81c784]">your-pack-slug</code> or <code class="text-[#81c784]">your-pack-slug@1.0.0</code>) or full <code class="text-[#81c784]">https://modrinth.com/modpack/...</code> URL</div>
+          <div>• <strong>Direct .mrpack:</strong> Paste any <code class="text-[#4fc3f7]">https://.../*.mrpack</code> link (Modrinth CDN or GitHub Release)</div>
+          <div>• <strong>Custom Manifest:</strong> Paste a <code class="text-[#ffd54f]">https://.../launcher-manifest.json</code> URL</div>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-3 gap-3 pt-1">
+        <div class="col-span-2">
+          <label for="server-host-input" class="font-bold text-[#4fc3f7] block mb-1 text-xs">
+            MINECRAFT SERVER HOST / IP
+          </label>
+          <input
+            id="server-host-input"
+            type="text"
+            placeholder="play.example.com"
+            bind:value={config.server_host}
+            class="w-full bg-[#1b1b1b] border border-[#444] px-2.5 py-1.5 text-white font-mc-mono text-sm"
+          />
+        </div>
+        <div>
+          <label for="server-port-input" class="font-bold text-[#4fc3f7] block mb-1 text-xs">
+            SERVER PORT
+          </label>
+          <input
+            id="server-port-input"
+            type="number"
+            bind:value={config.server_port}
+            class="w-full bg-[#1b1b1b] border border-[#444] px-2.5 py-1.5 text-white font-mc-mono text-sm"
+          />
+        </div>
+      </div>
+
+      <label class="flex items-center gap-2 pt-1 cursor-pointer text-xs">
+        <input type="checkbox" bind:checked={config.keep_user_mods} />
+        <span class="font-bold text-[#a5d6a7]">
+          Allow user-installed mods (do not delete custom mods in mods/ folder on sync)
+        </span>
+      </label>
+    </div>
+
     <!-- RAM ALLOCATION -->
     <div class="mc-inset p-3.5 space-y-2">
       <div class="flex justify-between items-center">
-        <label for="max-ram-slider" class="font-bold text-[#a5d6a7]">
+        <label for="max-ram-slider" class="font-bold text-[#a5d6a7] text-xs">
           MAXIMUM MEMORY (RAM) ALLOCATION
         </label>
         <span class="text-sm font-bold text-white">
@@ -922,52 +1391,30 @@
         class="mc-slider w-full"
         autofocus
       />
-      <div class="flex justify-between text-[10px] text-[#888]">
+      <div class="flex justify-between text-xs text-[#888]">
         <span>Min: 2048 MB</span>
         <span>Recommended: {systemMemory.recommended_max_mb} MB</span>
         <span>System Total: {systemMemory.total_ram_mb} MB</span>
       </div>
     </div>
 
-    <!-- INSTANCE DIRECTORY -->
-    <div class="mc-inset p-3.5 space-y-2">
-      <label for="instance-dir-input" class="font-bold text-[#4fc3f7] block">
-        MODPACK INSTANCE DIRECTORY
-      </label>
-      <div class="flex gap-2">
-        <input
-          id="instance-dir-input"
-          type="text"
-          bind:value={config.instance_dir}
-          class="flex-1 bg-[#1b1b1b] border border-[#444] px-2.5 py-1.5 text-xs text-white font-mc-mono text-base"
-        />
-        <button
-          type="button"
-          onclick={browseInstanceFolder}
-          class="mc-btn px-3 py-1.5 text-xs"
-        >
-          BROWSE
-        </button>
-      </div>
-    </div>
-
-    <!-- JAVA RUNTIME & JVM FLAGS -->
+    <!-- JAVA RUNTIME & DETECTED SYSTEM JDKS -->
     <div class="mc-inset p-3.5 space-y-3">
       <div>
-        <label for="java-path-input" class="font-bold text-[#ffd54f] block mb-1">
-          JAVA RUNTIME EXECUTABLE (LEAVE EMPTY FOR AUTO ADOPTIUM JRE)
+        <label for="java-path-input" class="font-bold text-[#ffd54f] block mb-1 text-xs">
+          JAVA RUNTIME (AUTO-USES INSTALLED SYSTEM JDK 8 / 17 / 21+)
         </label>
         <div class="flex gap-2">
           <input
             id="java-path-input"
             type="text"
-            placeholder="Auto-download matching Java 8 / 17 / 21 via Adoptium API"
+            placeholder="Auto-select matching system JDK (/usr/lib/jvm, etc.)"
             value={config.java_path ?? ""}
             oninput={(e) => {
               const val = (e.currentTarget as HTMLInputElement).value.trim();
               config.java_path = val.length > 0 ? val : null;
             }}
-            class="flex-1 bg-[#1b1b1b] border border-[#444] px-2.5 py-1.5 text-white font-mc-mono text-base"
+            class="flex-1 bg-[#1b1b1b] border border-[#444] px-2.5 py-1.5 text-white font-mc-mono text-sm"
           />
           <button
             type="button"
@@ -979,28 +1426,72 @@
           <button
             type="button"
             onclick={() => (config.java_path = null)}
-            class="mc-btn px-2.5 py-1.5 text-xs"
+            class="mc-btn px-2.5 py-1.5 text-xs {!config.java_path ? 'mc-btn-green' : ''}"
           >
-            AUTO
+            AUTO SYSTEM JDK
           </button>
         </div>
+
+        {#if detectedJavas.length > 0}
+          <div class="mt-2">
+            <div class="text-xs text-[#aaa] mb-1">
+              Detected System JDKs (click to pin, or leave on AUTO to match MC version):
+            </div>
+            <div class="flex flex-wrap gap-1.5">
+              {#each detectedJavas as dj}
+                <button
+                  type="button"
+                  onclick={() => (config.java_path = dj.path)}
+                  class="mc-btn px-2.5 py-1 text-xs {config.java_path === dj.path
+                    ? 'mc-btn-green'
+                    : ''}"
+                  title={dj.path}
+                >
+                  {dj.label}
+                </button>
+              {/each}
+            </div>
+          </div>
+        {/if}
       </div>
 
       <div>
-        <label for="jvm-args-input" class="font-bold text-[#b0bec5] block mb-1">
+        <label for="jvm-args-input" class="font-bold text-[#b0bec5] block mb-1 text-xs">
           CUSTOM JVM ARGUMENTS
         </label>
         <input
           id="jvm-args-input"
           type="text"
           bind:value={config.jvm_args}
-          class="w-full bg-[#1b1b1b] border border-[#444] px-2.5 py-1.5 text-white font-mc-mono text-base"
+          class="w-full bg-[#1b1b1b] border border-[#444] px-2.5 py-1.5 text-white font-mc-mono text-sm"
         />
       </div>
     </div>
 
+    <!-- INSTANCE DIRECTORY -->
+    <div class="mc-inset p-3.5 space-y-2">
+      <label for="instance-dir-input" class="font-bold text-[#4fc3f7] block text-xs">
+        MODPACK INSTANCE DIRECTORY
+      </label>
+      <div class="flex gap-2">
+        <input
+          id="instance-dir-input"
+          type="text"
+          bind:value={config.instance_dir}
+          class="flex-1 bg-[#1b1b1b] border border-[#444] px-2.5 py-1.5 text-white font-mc-mono text-sm"
+        />
+        <button
+          type="button"
+          onclick={browseInstanceFolder}
+          class="mc-btn px-3 py-1.5 text-xs"
+        >
+          BROWSE
+        </button>
+      </div>
+    </div>
+
     <!-- DISPLAY & LIFECYCLE -->
-    <div class="mc-inset p-3.5 grid grid-cols-2 gap-4">
+    <div class="mc-inset p-3.5 grid grid-cols-2 gap-4 text-xs">
       <div class="space-y-2">
         <div class="font-bold text-[#ce93d8]">GAME RESOLUTION</div>
         <div class="flex items-center gap-2">
@@ -1045,22 +1536,10 @@
       </div>
     </div>
 
-    <!-- ADVANCED: MANIFEST URL & AZURE CLIENT ID -->
+    <!-- ADVANCED: AZURE CLIENT ID -->
     <div class="mc-inset p-3.5 space-y-3">
       <div>
-        <label for="manifest-url-input" class="font-bold text-[#80cbc4] block mb-1">
-          REMOTE MANIFEST JSON URL (GITHUB / CDN)
-        </label>
-        <input
-          id="manifest-url-input"
-          type="url"
-          bind:value={config.manifest_url}
-          class="w-full bg-[#1b1b1b] border border-[#444] px-2.5 py-1.5 text-white font-mc-mono text-base"
-        />
-      </div>
-
-      <div>
-        <label for="azure-client-input" class="font-bold text-[#80cbc4] block mb-1">
+        <label for="azure-client-input" class="font-bold text-[#80cbc4] block mb-1 text-xs">
           MICROSOFT OAUTH CLIENT ID (DEFAULT: 00000000441cc96b PRE-APPROVED)
         </label>
         <div class="flex gap-2">
@@ -1068,7 +1547,7 @@
             id="azure-client-input"
             type="text"
             bind:value={config.azure_client_id}
-            class="flex-1 bg-[#1b1b1b] border border-[#444] px-2.5 py-1.5 text-white font-mc-mono text-base"
+            class="flex-1 bg-[#1b1b1b] border border-[#444] px-2.5 py-1.5 text-white font-mc-mono text-sm"
           />
           <button
             type="button"
@@ -1098,7 +1577,7 @@
 </dialog>
 
 <!-- ========================================================================= -->
-<!-- NATIVE MODAL 3: REAL-TIME GAME CONSOLE / CRASH LOG VIEWER                 -->
+<!-- NATIVE MODAL 5: REAL-TIME GAME CONSOLE / CRASH LOG VIEWER                 -->
 <!-- ========================================================================= -->
 <dialog
   bind:this={consoleDialog}
@@ -1107,7 +1586,7 @@
   class="mc-panel w-[760px] p-5 text-white"
 >
   <div class="flex items-center justify-between border-b-2 border-[#181818] pb-3 mb-3">
-    <h2 id="console-dialog-title" class="font-mc-title text-sm text-[#4fc3f7]">
+    <h2 id="console-dialog-title" class="font-mc-title text-base text-[#4fc3f7]">
       REAL-TIME GAME LOG CONSOLE
     </h2>
     <div class="flex items-center gap-2">
@@ -1115,7 +1594,7 @@
         <button
           type="button"
           onclick={() => (logFilter = lvl as any)}
-          class="mc-btn px-2.5 py-1 text-[10px] {logFilter === lvl
+          class="mc-btn px-2.5 py-1 text-xs {logFilter === lvl
             ? 'mc-btn-green'
             : ''}"
         >
@@ -1129,16 +1608,16 @@
   </div>
 
   <div
-    class="mc-inset p-3 h-[360px] overflow-y-auto font-mc-mono text-base space-y-1 select-text"
+    class="mc-inset p-3 h-[360px] overflow-y-auto font-mc-mono text-xs space-y-1 select-text"
   >
     {#if filteredLogs.length === 0}
-      <div class="text-[#777] text-center py-12">
+      <div class="text-[#777] text-center py-12 text-sm">
         No game logs recorded yet. Launch the modpack to stream live JVM stdout/stderr.
       </div>
     {:else}
       {#each filteredLogs as entry}
         <div
-          class="leading-tight break-all {entry.level === 'ERROR'
+          class="leading-relaxed break-all {entry.level === 'ERROR'
             ? 'text-[#ff8a80]'
             : entry.level === 'WARN'
               ? 'text-[#ffd54f]'

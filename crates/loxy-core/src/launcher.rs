@@ -4,6 +4,7 @@ use crate::modpack::{
 };
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::Local;
+use futures_util::stream::{self, StreamExt};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11,9 +12,13 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
+
+const LIBRARY_DOWNLOAD_CONCURRENCY: usize = 16;
+const ASSET_DOWNLOAD_CONCURRENCY: usize = 32;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameLogEntry {
@@ -153,13 +158,13 @@ pub async fn prepare_and_launch_minecraft<FProg, FLog, FWin, FExit>(
     manifest: &RemoteManifest,
     java_bin: &Path,
     log_buffer: Arc<Mutex<Vec<GameLogEntry>>>,
-    mut on_progress: FProg,
+    on_progress: FProg,
     on_log: Arc<FLog>,
     on_window_action: Arc<FWin>,
     on_exit: Arc<FExit>,
 ) -> Result<()>
 where
-    FProg: FnMut(SyncProgressEvent),
+    FProg: FnMut(SyncProgressEvent) + Send + 'static,
     FLog: Fn(GameLogEntry) + Send + Sync + 'static,
     FWin: Fn(WindowAction) + Send + Sync + 'static,
     FExit: Fn(GameExitEvent) + Send + Sync + 'static,
@@ -176,9 +181,16 @@ where
     fs::create_dir_all(&assets_dir)?;
     fs::create_dir_all(&natives_dir)?;
 
+    let progress_cb = Arc::new(Mutex::new(on_progress));
+    let emit_prog = |ev: SyncProgressEvent| {
+        if let Ok(mut cb) = progress_cb.lock() {
+            cb(ev);
+        }
+    };
+
     let mc_ver = &manifest.minecraft_version;
 
-    on_progress(SyncProgressEvent {
+    emit_prog(SyncProgressEvent {
         stage: "Resolving Minecraft version metadata".to_string(),
         current_file: mc_ver.clone(),
         completed: 0,
@@ -228,24 +240,24 @@ where
         let sha1 = client_dl.get("sha1").and_then(|s| s.as_str());
 
         if !file_matches_hashes(&client_jar_path, sha1, None, None) {
-            on_progress(SyncProgressEvent {
+            emit_prog(SyncProgressEvent {
                 stage: "Downloading Minecraft client JAR".to_string(),
                 current_file: format!("{}.jar", mc_ver),
                 completed: 1,
                 total: 4,
-                percent: 25,
+                percent: 20,
             });
             download_and_verify_file(client, url, &client_jar_path, sha1, None, None).await?;
         }
     }
 
-    // 3. Resolve & download Vanilla libraries
+    // 3. Resolve & concurrently download Vanilla libraries (16 parallel streams)
     let mut classpath_entries: Vec<PathBuf> = Vec::new();
     let mut seen_libs = HashSet::new();
+    let mut missing_libs: Vec<(String, String, PathBuf, Option<String>)> = Vec::new();
 
     if let Some(libs) = mc_json.get("libraries").and_then(|l| l.as_array()) {
-        let total_libs = libs.len().max(1);
-        for (idx, lib) in libs.iter().enumerate() {
+        for lib in libs {
             let rules = lib.get("rules").and_then(|r| r.as_array());
             if !rules_allow_current_os(rules) {
                 continue;
@@ -256,17 +268,18 @@ where
                     artifact.get("path").and_then(|p| p.as_str()),
                     artifact.get("url").and_then(|u| u.as_str()),
                 ) {
-                    let sha1 = artifact.get("sha1").and_then(|s| s.as_str());
+                    let sha1 = artifact
+                        .get("sha1")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_string());
                     let dest = libraries_dir.join(rel_path);
-                    if !file_matches_hashes(&dest, sha1, None, None) {
-                        on_progress(SyncProgressEvent {
-                            stage: "Downloading Minecraft libraries".to_string(),
-                            current_file: rel_path.to_string(),
-                            completed: idx + 1,
-                            total: total_libs,
-                            percent: 25 + (((idx + 1) * 30) / total_libs) as u8,
-                        });
-                        download_and_verify_file(client, url, &dest, sha1, None, None).await?;
+                    if !file_matches_hashes(&dest, sha1.as_deref(), None, None) {
+                        missing_libs.push((
+                            rel_path.to_string(),
+                            url.to_string(),
+                            dest.clone(),
+                            sha1,
+                        ));
                     }
                     if seen_libs.insert(dest.clone()) {
                         classpath_entries.push(dest);
@@ -276,7 +289,46 @@ where
         }
     }
 
-    // 4. Download Asset Index & Required Assets
+    if !missing_libs.is_empty() {
+        let total_missing = missing_libs.len();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let prog_arc = progress_cb.clone();
+
+        let results: Vec<Result<()>> = stream::iter(missing_libs.into_iter())
+            .map(|(rel_path, url, dest, sha1)| {
+                let client = client.clone();
+                let counter = counter.clone();
+                let prog = prog_arc.clone();
+                async move {
+                    download_and_verify_file(&client, &url, &dest, sha1.as_deref(), None, None)
+                        .await?;
+                    let done = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                    let pct = 20 + ((done * 30) / total_missing.max(1)) as u8;
+                    if let Ok(mut cb) = prog.lock() {
+                        cb(SyncProgressEvent {
+                            stage: format!(
+                                "Downloading Minecraft libraries ({}/{})",
+                                done, total_missing
+                            ),
+                            current_file: rel_path,
+                            completed: done,
+                            total: total_missing,
+                            percent: pct.min(50),
+                        });
+                    }
+                    Ok(())
+                }
+            })
+            .buffer_unordered(LIBRARY_DOWNLOAD_CONCURRENCY)
+            .collect()
+            .await;
+
+        for res in results {
+            res?;
+        }
+    }
+
+    // 4. Download Asset Index & Concurrently Download Missing Assets (32 parallel streams)
     let asset_index_id = mc_json
         .get("assetIndex")
         .and_then(|a| a.get("id"))
@@ -294,14 +346,15 @@ where
                 download_and_verify_file(client, url, &idx_dest, sha1, None, None).await?;
             }
 
-            // Verify / download missing asset objects
             if let Ok(idx_raw) = fs::read_to_string(&idx_dest) {
                 if let Ok(idx_json) = serde_json::from_str::<Value>(&idx_raw) {
                     if let Some(objects) = idx_json.get("objects").and_then(|o| o.as_object()) {
-                        let total_objs = objects.len().max(1);
-                        for (i, (_name, obj_val)) in objects.iter().enumerate() {
+                        let mut missing_assets: Vec<(String, String, PathBuf)> = Vec::new();
+                        let mut seen_hashes = HashSet::new();
+
+                        for (_name, obj_val) in objects {
                             if let Some(hash) = obj_val.get("hash").and_then(|h| h.as_str()) {
-                                if hash.len() >= 2 {
+                                if hash.len() >= 2 && seen_hashes.insert(hash.to_string()) {
                                     let prefix = &hash[0..2];
                                     let obj_path =
                                         assets_dir.join("objects").join(prefix).join(hash);
@@ -310,27 +363,55 @@ where
                                             "https://resources.download.minecraft.net/{}/{}",
                                             prefix, hash
                                         );
-                                        if i % 25 == 0 {
-                                            on_progress(SyncProgressEvent {
-                                                stage: "Downloading game assets".to_string(),
-                                                current_file: format!("{}/{}", prefix, hash),
-                                                completed: i + 1,
-                                                total: total_objs,
-                                                percent: 55 + (((i + 1) * 25) / total_objs) as u8,
-                                            });
-                                        }
-                                        let _ = download_and_verify_file(
-                                            client,
-                                            &obj_url,
-                                            &obj_path,
-                                            Some(hash),
-                                            None,
-                                            None,
-                                        )
-                                        .await;
+                                        missing_assets.push((
+                                            format!("{}/{}", prefix, hash),
+                                            obj_url,
+                                            obj_path,
+                                        ));
                                     }
                                 }
                             }
+                        }
+
+                        if !missing_assets.is_empty() {
+                            let total_assets = missing_assets.len();
+                            let counter = Arc::new(AtomicUsize::new(0));
+                            let prog_arc = progress_cb.clone();
+
+                            let _results: Vec<Result<()>> =
+                                stream::iter(missing_assets.into_iter())
+                                    .map(|(label, obj_url, obj_path)| {
+                                        let client = client.clone();
+                                        let counter = counter.clone();
+                                        let prog = prog_arc.clone();
+                                        async move {
+                                            let _ = download_and_verify_file(
+                                                &client, &obj_url, &obj_path, None, None, None,
+                                            )
+                                            .await;
+                                            let done = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                                            if done % 15 == 0 || done == total_assets {
+                                                let pct = 50
+                                                    + ((done * 30) / total_assets.max(1)) as u8;
+                                                if let Ok(mut cb) = prog.lock() {
+                                                    cb(SyncProgressEvent {
+                                                        stage: format!(
+                                                            "Downloading game assets ({}/{})",
+                                                            done, total_assets
+                                                        ),
+                                                        current_file: label,
+                                                        completed: done,
+                                                        total: total_assets,
+                                                        percent: pct.min(80),
+                                                    });
+                                                }
+                                            }
+                                            Ok(())
+                                        }
+                                    })
+                                    .buffer_unordered(ASSET_DOWNLOAD_CONCURRENCY)
+                                    .collect()
+                                    .await;
                         }
                     }
                 }
@@ -350,7 +431,7 @@ where
 
     match manifest.loader {
         ModLoaderType::Fabric => {
-            on_progress(SyncProgressEvent {
+            emit_prog(SyncProgressEvent {
                 stage: "Resolving Fabric Loader".to_string(),
                 current_file: format!("fabric-loader-{}", manifest.loader_version),
                 completed: 3,
@@ -368,9 +449,16 @@ where
                     "https://meta.fabricmc.net/v2/versions/loader/{}/{}/profile/json",
                     mc_ver, manifest.loader_version
                 );
-                download_and_verify_file(client, &fabric_url, &fabric_profile_path, None, None, None)
-                    .await
-                    .context("Failed to fetch Fabric Loader profile metadata")?;
+                download_and_verify_file(
+                    client,
+                    &fabric_url,
+                    &fabric_profile_path,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .context("Failed to fetch Fabric Loader profile metadata")?;
             }
 
             let fabric_raw = fs::read_to_string(&fabric_profile_path)?;
@@ -380,6 +468,9 @@ where
                 main_class = mc.to_string();
             }
 
+            let mut fabric_missing_libs = Vec::new();
+            let mut fabric_cp_entries = Vec::new();
+
             if let Some(libs) = fabric_json.get("libraries").and_then(|l| l.as_array()) {
                 for lib in libs {
                     if let Some(name) = lib.get("name").and_then(|n| n.as_str()) {
@@ -388,26 +479,53 @@ where
                             .and_then(|u| u.as_str())
                             .unwrap_or("https://maven.fabricmc.net/");
                         let rel_path = maven_coord_to_path(name)?;
-                        let full_url = format!(
-                            "{}/{}",
-                            base_url.trim_end_matches('/'),
-                            rel_path
-                        );
+                        let full_url =
+                            format!("{}/{}", base_url.trim_end_matches('/'), rel_path);
                         let dest = libraries_dir.join(&rel_path);
-                        let sha1 = lib.get("sha1").and_then(|s| s.as_str());
-                        if !file_matches_hashes(&dest, sha1, None, None) {
-                            download_and_verify_file(client, &full_url, &dest, sha1, None, None)
-                                .await?;
+                        let sha1 = lib
+                            .get("sha1")
+                            .and_then(|s| s.as_str())
+                            .map(|s| s.to_string());
+                        if !file_matches_hashes(&dest, sha1.as_deref(), None, None) {
+                            fabric_missing_libs.push((full_url, dest.clone(), sha1));
                         }
                         if seen_libs.insert(dest.clone()) {
-                            classpath_entries.insert(0, dest);
+                            fabric_cp_entries.push(dest);
                         }
                     }
                 }
             }
+
+            if !fabric_missing_libs.is_empty() {
+                let results: Vec<Result<()>> = stream::iter(fabric_missing_libs.into_iter())
+                    .map(|(full_url, dest, sha1)| {
+                        let client = client.clone();
+                        async move {
+                            download_and_verify_file(
+                                &client,
+                                &full_url,
+                                &dest,
+                                sha1.as_deref(),
+                                None,
+                                None,
+                            )
+                            .await
+                        }
+                    })
+                    .buffer_unordered(LIBRARY_DOWNLOAD_CONCURRENCY)
+                    .collect()
+                    .await;
+                for r in results {
+                    r?;
+                }
+            }
+
+            // Prepend Fabric loader libraries ahead of Vanilla libraries
+            fabric_cp_entries.extend(classpath_entries);
+            classpath_entries = fabric_cp_entries;
         }
         ModLoaderType::NeoForge | ModLoaderType::Forge => {
-            on_progress(SyncProgressEvent {
+            emit_prog(SyncProgressEvent {
                 stage: format!("Preparing {:?} Loader", manifest.loader),
                 current_file: manifest.loader_version.clone(),
                 completed: 3,
@@ -512,7 +630,7 @@ where
 
     cmd_args.extend(extra_game_args);
 
-    on_progress(SyncProgressEvent {
+    emit_prog(SyncProgressEvent {
         stage: "Starting Minecraft process".to_string(),
         current_file: main_class,
         completed: 4,

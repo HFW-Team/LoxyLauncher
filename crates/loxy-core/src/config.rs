@@ -58,7 +58,10 @@ pub struct LauncherConfig {
     pub fullscreen: bool,
     pub close_behavior: CloseBehavior,
     pub discord_rpc_enabled: bool,
+    pub keep_user_mods: bool,
     pub manifest_url: String,
+    pub server_host: String,
+    pub server_port: u16,
     pub azure_client_id: String,
     pub account: Option<MinecraftAccount>,
 }
@@ -136,7 +139,10 @@ impl Default for LauncherConfig {
             fullscreen: false,
             close_behavior: CloseBehavior::HideAndReopen,
             discord_rpc_enabled: true,
+            keep_user_mods: true,
             manifest_url: DEFAULT_MANIFEST_URL.to_string(),
+            server_host: "play.loxy.gg".to_string(),
+            server_port: 25565,
             azure_client_id: DEFAULT_AZURE_CLIENT_ID.to_string(),
             account: None,
         }

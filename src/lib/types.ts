@@ -23,7 +23,10 @@ export interface LauncherConfig {
   fullscreen: boolean;
   close_behavior: CloseBehavior;
   discord_rpc_enabled: boolean;
+  keep_user_mods: boolean;
   manifest_url: string;
+  server_host: string;
+  server_port: number;
   azure_client_id: string;
   account: MinecraftAccount | null;
 }
@@ -33,9 +36,16 @@ export interface SystemMemoryInfo {
   recommended_max_mb: number;
 }
 
+export interface DetectedJava {
+  path: string;
+  major_version: number;
+  label: string;
+}
+
 export interface InitialStateResponse {
   config: LauncherConfig;
   system_memory: SystemMemoryInfo;
+  detected_javas: DetectedJava[];
 }
 
 export interface ManifestFileEntry {
@@ -111,4 +121,22 @@ export interface GameLogEntry {
 export interface GameExitEvent {
   exit_code: number;
   crashed: boolean;
+}
+
+export interface ModrinthSearchHit {
+  project_id: string;
+  slug: string;
+  title: string;
+  author: string;
+  description: string;
+  icon_url: string | null;
+  downloads: number;
+  follows: number;
+}
+
+export interface InstalledModEntry {
+  filename: string;
+  enabled: boolean;
+  is_user_mod: boolean;
+  size_kb: number;
 }

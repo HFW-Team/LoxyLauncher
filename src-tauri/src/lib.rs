@@ -4,8 +4,13 @@ use auth::DeviceCodeResponse;
 use chrono::Utc;
 use config::{LauncherConfig, MinecraftAccount, SystemMemoryInfo};
 use discord::DiscordRpcManager;
+use java::DetectedJava;
 use launcher::{push_log, GameLogEntry, WindowAction};
-use modpack::{fetch_or_fallback_manifest, synchronize_modpack, ManifestCheckResult, SyncProgressEvent};
+use modpack::{
+    fetch_or_fallback_manifest, install_modrinth_mod, list_installed_mods, search_modrinth_mods,
+    synchronize_modpack, toggle_or_delete_installed_mod, InstalledModEntry, ManifestCheckResult,
+    ModLoaderType, ModrinthSearchHit, SyncProgressEvent,
+};
 use ping::{ping_minecraft_server, ServerStatus};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -25,6 +30,7 @@ pub struct AppState {
 pub struct InitialStateResponse {
     pub config: LauncherConfig,
     pub system_memory: SystemMemoryInfo,
+    pub detected_javas: Vec<DetectedJava>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +54,7 @@ async fn get_initial_state(state: State<'_, AppState>) -> Result<InitialStateRes
     Ok(InitialStateResponse {
         config: cfg,
         system_memory: LauncherConfig::system_memory_info(),
+        detected_javas: java::detect_system_javas(),
     })
 }
 
@@ -77,8 +84,14 @@ async fn check_manifest_and_server(state: State<'_, AppState>) -> Result<Dashboa
         .clone();
 
     let instance_dir = PathBuf::from(&cfg.instance_dir);
-    let manifest_check =
-        fetch_or_fallback_manifest(&state.http_client, &cfg.manifest_url, &instance_dir).await;
+    let manifest_check = fetch_or_fallback_manifest(
+        &state.http_client,
+        &cfg.manifest_url,
+        &cfg.server_host,
+        cfg.server_port,
+        &instance_dir,
+    )
+    .await;
 
     let server_status = ping_minecraft_server(
         &manifest_check.manifest.server_host,
@@ -183,6 +196,63 @@ async fn clear_game_logs(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn search_mods_on_modrinth(
+    state: State<'_, AppState>,
+    query: String,
+    mc_version: String,
+    loader: ModLoaderType,
+) -> Result<Vec<ModrinthSearchHit>, String> {
+    search_modrinth_mods(&state.http_client, &query, &mc_version, &loader)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn install_mod_from_modrinth(
+    state: State<'_, AppState>,
+    project_id: String,
+    mc_version: String,
+    loader: ModLoaderType,
+) -> Result<InstalledModEntry, String> {
+    let instance_dir = {
+        let cfg = state.config.lock().map_err(|e| e.to_string())?;
+        PathBuf::from(&cfg.instance_dir)
+    };
+    install_modrinth_mod(
+        &state.http_client,
+        &project_id,
+        &mc_version,
+        &loader,
+        &instance_dir,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_installed_mods(state: State<'_, AppState>) -> Result<Vec<InstalledModEntry>, String> {
+    let instance_dir = {
+        let cfg = state.config.lock().map_err(|e| e.to_string())?;
+        PathBuf::from(&cfg.instance_dir)
+    };
+    list_installed_mods(&instance_dir).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn manage_installed_mod(
+    state: State<'_, AppState>,
+    filename: String,
+    delete: bool,
+) -> Result<Vec<InstalledModEntry>, String> {
+    let instance_dir = {
+        let cfg = state.config.lock().map_err(|e| e.to_string())?;
+        PathBuf::from(&cfg.instance_dir)
+    };
+    toggle_or_delete_installed_mod(&instance_dir, &filename, delete).map_err(|e| e.to_string())?;
+    list_installed_mods(&instance_dir).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn sync_and_launch_game(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -242,8 +312,14 @@ async fn sync_and_launch_game(
     let instance_dir = PathBuf::from(&cfg.instance_dir);
     let shared_dir = PathBuf::from(&cfg.shared_dir);
 
-    let mut check =
-        fetch_or_fallback_manifest(&state.http_client, &cfg.manifest_url, &instance_dir).await;
+    let mut check = fetch_or_fallback_manifest(
+        &state.http_client,
+        &cfg.manifest_url,
+        &cfg.server_host,
+        cfg.server_port,
+        &instance_dir,
+    )
+    .await;
 
     if check.is_offline_fallback {
         if let Some(warn) = &check.offline_warning {
@@ -260,6 +336,7 @@ async fn sync_and_launch_game(
             &state.http_client,
             &mut check.manifest,
             &instance_dir,
+            cfg.keep_user_mods,
             move |prog| {
                 let _ = app_sync.emit("sync-progress", prog);
             },
@@ -350,7 +427,9 @@ pub fn run() {
     let config = LauncherConfig::load().unwrap_or_default();
     let http_client = Client::builder()
         .user_agent("LoxyLauncher/0.1.0 (https://github.com/loxy-community/loxylauncher)")
-        .timeout(Duration::from_secs(60))
+        .pool_max_idle_per_host(32)
+        .tcp_nodelay(true)
+        .timeout(Duration::from_secs(120))
         .build()
         .expect("Failed to initialize HTTP client");
 
@@ -376,6 +455,10 @@ pub fn run() {
             logout_account,
             get_game_logs,
             clear_game_logs,
+            search_mods_on_modrinth,
+            install_mod_from_modrinth,
+            get_installed_mods,
+            manage_installed_mod,
             sync_and_launch_game,
         ])
         .run(tauri::generate_context!())
