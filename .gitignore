@@ -4,3 +4,4 @@ debug/
 .fingerprint/
 target/debug/*
 dist/assets/
+dist/
