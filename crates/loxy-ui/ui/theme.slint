@@ -1,0 +1,95 @@
+export global McTheme {
+    in property <color> background: #121212;
+    in property <color> panel-bg: #1c1c1c;
+    in property <color> panel-alt: #161616;
+    in property <color> panel-border: #2a2a2a;
+    in property <color> panel-border-highlight: #3a3a3a;
+    in property <color> card-bg: #181818;
+    in property <color> card-hover: #222222;
+    in property <color> card-border: #2e2e2e;
+    
+    in property <color> text-primary: #ffffff;
+    in property <color> text-secondary: #bbbbbb;
+    in property <color> text-muted: #777777;
+    
+    in property <color> green-normal: #2e7d32;
+    in property <color> green-hover: #388e3c;
+    in property <color> green-active: #1b5e20;
+    
+    in property <color> red-normal: #c62828;
+    in property <color> red-hover: #d32f2f;
+    
+    in property <color> blue-normal: #1565c0;
+    in property <color> blue-hover: #1976d2;
+    
+    in property <color> gold: #fbc02d;
+    
+    in property <color> btn-bg: #2a2a2a;
+    in property <color> btn-hover: #3a3a3a;
+    in property <color> btn-active: #1e1e1e;
+    in property <color> btn-border: #444444;
+}
+
+export component McButton inherits Rectangle {
+    in property <string> text: "BUTTON";
+    in property <bool> primary: false;
+    in property <bool> danger: false;
+    in property <bool> disabled: false;
+    in property <length> font-size: 13px;
+    in property <length> h-padding: 14px;
+    in property <length> v-padding: 8px;
+    
+    callback clicked();
+    
+    background: disabled ? #1a1a1a :
+                primary ? (touch.pressed ? McTheme.green-active : (touch.has-hover ? McTheme.green-hover : McTheme.green-normal)) :
+                danger ? (touch.pressed ? #b71c1c : (touch.has-hover ? McTheme.red-hover : McTheme.red-normal)) :
+                (touch.pressed ? McTheme.btn-active : (touch.has-hover ? McTheme.btn-hover : McTheme.btn-bg));
+                
+    border-color: disabled ? #222222 :
+                  primary ? #4caf50 :
+                  danger ? #ef5350 :
+                  (touch.has-hover ? #666666 : McTheme.btn-border);
+    border-width: 1px;
+    
+    height: label.preferred-height + v-padding * 2;
+    min-width: label.preferred-width + h-padding * 2;
+    
+    touch := TouchArea {
+        enabled: !root.disabled;
+        clicked => { root.clicked(); }
+    }
+    
+    label := Text {
+        text: root.text;
+        color: root.disabled ? #555555 : McTheme.text-primary;
+        font-size: root.font-size;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+export component McIconButton inherits Rectangle {
+    in property <string> text: "✕";
+    callback clicked();
+    
+    width: 28px;
+    height: 28px;
+    background: touch.has-hover ? #333333 : #222222;
+    border-color: #444444;
+    border-width: 1px;
+    
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+    
+    Text {
+        text: root.text;
+        color: McTheme.text-primary;
+        font-size: 13px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}

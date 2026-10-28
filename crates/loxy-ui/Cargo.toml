@@ -1,0 +1,26 @@
+[package]
+name = "loxy-ui"
+version = "0.1.0"
+edition = "2021"
+description = "Native, lightweight Minecraft modpack launcher UI built with Slint and pure software rendering"
+
+[[bin]]
+name = "loxylauncher"
+path = "src/main.rs"
+
+[dependencies]
+loxy-core = { path = "../loxy-core" }
+slint = { version = "1.18.1", default-features = false, features = ["std", "backend-default", "renderer-software", "accessibility", "compat-1-2"] }
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+rfd = "0.15"
+open = "5.3"
+arboard = "3.4"
+dirs = "6.0"
+
+[build-dependencies]
+slint-build = "1.18.1"

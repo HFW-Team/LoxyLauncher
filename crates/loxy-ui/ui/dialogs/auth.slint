@@ -1,0 +1,103 @@
+import { McTheme, McButton, McIconButton } from "../theme.slint";
+
+export component AuthDialog inherits Rectangle {
+    in property <bool> is-open: false;
+    in property <string> user-code: "ABCD-EFGH";
+    in property <string> direct-verification-uri: "https://microsoft.com/link";
+    in property <string> status-text: "Waiting for browser confirmation...";
+    in property <bool> code-copied: false;
+    
+    callback copy-code-clicked();
+    callback open-browser-clicked();
+    callback close-clicked();
+    
+    visible: root.is-open;
+    background: #000000bb;
+    
+    // Prevent click-through
+    TouchArea {}
+    
+    Rectangle {
+        width: 480px;
+        height: 340px;
+        background: McTheme.panel-bg;
+        border-color: McTheme.panel-border-highlight;
+        border-width: 1px;
+        
+        VerticalLayout {
+            padding: 20px;
+            spacing: 16px;
+            alignment: space-between;
+            
+            HorizontalLayout {
+                alignment: space-between;
+                Text {
+                    text: "MICROSOFT AUTHENTICATION";
+                    font-size: 14px;
+                    font-weight: 700;
+                    color: McTheme.text-primary;
+                }
+                McIconButton {
+                    clicked => { root.close-clicked(); }
+                }
+            }
+            
+            Text {
+                text: "1. Copy the authentication code below.\n2. Open Microsoft device login and paste the code.\n3. Sign in to your Microsoft account owning Minecraft.";
+                font-size: 12px;
+                color: McTheme.text-secondary;
+                wrap: word-wrap;
+            }
+            
+            // Code box
+            Rectangle {
+                background: #101010;
+                border-color: #333333;
+                border-width: 1px;
+                height: 52px;
+                
+                HorizontalLayout {
+                    padding: 8px;
+                    alignment: space-between;
+                    
+                    Text {
+                        text: root.user-code;
+                        font-size: 20px;
+                        font-weight: 700;
+                        color: #4caf50;
+                        vertical-alignment: center;
+                    }
+                    
+                    McButton {
+                        text: root.code-copied ? "COPIED!" : "COPY CODE";
+                        font-size: 11px;
+                        clicked => { root.copy-code-clicked(); }
+                    }
+                }
+            }
+            
+            Text {
+                text: root.status-text;
+                font-size: 11px;
+                color: McTheme.gold;
+                horizontal-alignment: center;
+            }
+            
+            HorizontalLayout {
+                spacing: 12px;
+                alignment: end;
+                
+                McButton {
+                    text: "OPEN BROWSER LOGIN";
+                    primary: true;
+                    clicked => { root.open-browser-clicked(); }
+                }
+                
+                McButton {
+                    text: "CANCEL";
+                    clicked => { root.close-clicked(); }
+                }
+            }
+        }
+    }
+}

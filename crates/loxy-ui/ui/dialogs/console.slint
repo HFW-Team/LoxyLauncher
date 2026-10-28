@@ -1,0 +1,166 @@
+import { McTheme, McButton, McIconButton } from "../theme.slint";
+import { LogEntryData } from "../models.slint";
+import { ListView } from "std-widgets.slint";
+
+export component ConsoleDialog inherits Rectangle {
+    in property <bool> is-open: false;
+    in property <[LogEntryData]> logs: [];
+    in property <int> error-count: 0;
+    in-out property <string> filter-level: "ALL";
+    in property <bool> logs-copied: false;
+    
+    callback copy-logs-clicked();
+    callback clear-logs-clicked();
+    callback close-clicked();
+    
+    visible: root.is-open;
+    background: #000000bb;
+    TouchArea {}
+    
+    Rectangle {
+        width: 740px;
+        height: 520px;
+        background: McTheme.panel-bg;
+        border-color: McTheme.panel-border-highlight;
+        border-width: 1px;
+        
+        VerticalLayout {
+            padding: 18px;
+            spacing: 12px;
+            
+            HorizontalLayout {
+                alignment: space-between;
+                
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: start;
+                    Text {
+                        text: "GAME CONSOLE & CRASH LOGS";
+                        font-size: 15px;
+                        font-weight: 700;
+                        color: McTheme.text-primary;
+                        vertical-alignment: center;
+                    }
+                    if root.error-count > 0 : Rectangle {
+                        background: #c62828;
+                        border-radius: 2px;
+                        height: 20px;
+                        width: 70px;
+                        Text {
+                            text: root.error-count + " ERRORS";
+                            font-size: 10px;
+                            font-weight: 700;
+                            color: #ffffff;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                
+                McIconButton {
+                    clicked => { root.close-clicked(); }
+                }
+            }
+            
+            // Filter Bar & Action Buttons
+            HorizontalLayout {
+                alignment: space-between;
+                
+                HorizontalLayout {
+                    spacing: 6px;
+                    McButton {
+                        text: "ALL";
+                        primary: root.filter-level == "ALL";
+                        font-size: 10px;
+                        h-padding: 10px;
+                        v-padding: 4px;
+                        clicked => { root.filter-level = "ALL"; }
+                    }
+                    McButton {
+                        text: "INFO";
+                        primary: root.filter-level == "INFO";
+                        font-size: 10px;
+                        h-padding: 10px;
+                        v-padding: 4px;
+                        clicked => { root.filter-level = "INFO"; }
+                    }
+                    McButton {
+                        text: "WARN";
+                        primary: root.filter-level == "WARN";
+                        font-size: 10px;
+                        h-padding: 10px;
+                        v-padding: 4px;
+                        clicked => { root.filter-level = "WARN"; }
+                    }
+                    McButton {
+                        text: "ERROR";
+                        danger: root.filter-level == "ERROR";
+                        font-size: 10px;
+                        h-padding: 10px;
+                        v-padding: 4px;
+                        clicked => { root.filter-level = "ERROR"; }
+                    }
+                }
+                
+                HorizontalLayout {
+                    spacing: 8px;
+                    McButton {
+                        text: root.logs-copied ? "COPIED TO CLIPBOARD!" : "COPY ALL LOGS";
+                        font-size: 10px;
+                        h-padding: 10px;
+                        v-padding: 4px;
+                        clicked => { root.copy-logs-clicked(); }
+                    }
+                    McButton {
+                        text: "CLEAR";
+                        font-size: 10px;
+                        h-padding: 10px;
+                        v-padding: 4px;
+                        clicked => { root.clear-logs-clicked(); }
+                    }
+                }
+            }
+            
+            // Logs View
+            Rectangle {
+                background: #0d0d0d;
+                border-color: #262626;
+                border-width: 1px;
+                vertical-stretch: 1;
+                
+                ListView {
+                    for entry in root.logs : HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        padding-top: 2px;
+                        padding-bottom: 2px;
+                        spacing: 8px;
+                        
+                        Text {
+                            text: "[" + entry.timestamp + "]";
+                            font-size: 10px;
+                            color: #666666;
+                            width: 65px;
+                        }
+                        
+                        Text {
+                            text: "[" + entry.level + "]";
+                            font-size: 10px;
+                            font-weight: 700;
+                            width: 50px;
+                            color: entry.level == "ERROR" ? #e57373 : (entry.level == "WARN" ? #ffb74d : #81c784);
+                        }
+                        
+                        Text {
+                            text: entry.line;
+                            font-size: 11px;
+                            color: entry.level == "ERROR" ? #ffcdd2 : (entry.level == "WARN" ? #ffe082 : #e0e0e0);
+                            wrap: word-wrap;
+                            horizontal-stretch: 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

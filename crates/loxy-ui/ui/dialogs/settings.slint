@@ -1,0 +1,239 @@
+import { McTheme, McButton, McIconButton } from "../theme.slint";
+import { ConfigData } from "../models.slint";
+
+export component SettingsDialog inherits Rectangle {
+    in property <bool> is-open: false;
+    in-out property <ConfigData> config;
+    
+    callback browse-instance-clicked();
+    callback browse-shared-clicked();
+    callback browse-java-clicked();
+    callback save-clicked();
+    callback close-clicked();
+    
+    visible: root.is-open;
+    background: #000000bb;
+    TouchArea {}
+    
+    Rectangle {
+        width: 680px;
+        height: 540px;
+        background: McTheme.panel-bg;
+        border-color: McTheme.panel-border-highlight;
+        border-width: 1px;
+        
+        VerticalLayout {
+            padding: 20px;
+            spacing: 14px;
+            alignment: space-between;
+            
+            HorizontalLayout {
+                alignment: space-between;
+                Text {
+                    text: "LAUNCHER SETTINGS";
+                    font-size: 15px;
+                    font-weight: 700;
+                    color: McTheme.text-primary;
+                }
+                McIconButton {
+                    clicked => { root.close-clicked(); }
+                }
+            }
+            
+            // Directories Section
+            VerticalLayout {
+                spacing: 6px;
+                Text {
+                    text: "DIRECTORIES";
+                    font-size: 11px;
+                    font-weight: 700;
+                    color: McTheme.text-muted;
+                }
+                
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle {
+                        background: #141414;
+                        border-color: #333333;
+                        border-width: 1px;
+                        height: 32px;
+                        horizontal-stretch: 1;
+                        Text {
+                            text: "Instance: " + root.config.instance-dir;
+                            font-size: 11px;
+                            color: McTheme.text-secondary;
+                            overflow: elide;
+                            vertical-alignment: center;
+                            x: 8px;
+                        }
+                    }
+                    McButton {
+                        text: "BROWSE";
+                        font-size: 10px;
+                        clicked => { root.browse-instance-clicked(); }
+                    }
+                }
+                
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle {
+                        background: #141414;
+                        border-color: #333333;
+                        border-width: 1px;
+                        height: 32px;
+                        horizontal-stretch: 1;
+                        Text {
+                            text: "Shared: " + root.config.shared-dir;
+                            font-size: 11px;
+                            color: McTheme.text-secondary;
+                            overflow: elide;
+                            vertical-alignment: center;
+                            x: 8px;
+                        }
+                    }
+                    McButton {
+                        text: "BROWSE";
+                        font-size: 10px;
+                        clicked => { root.browse-shared-clicked(); }
+                    }
+                }
+            }
+            
+            // Java & Resolution
+            HorizontalLayout {
+                spacing: 16px;
+                
+                VerticalLayout {
+                    spacing: 6px;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: "JAVA RUNTIME";
+                        font-size: 11px;
+                        font-weight: 700;
+                        color: McTheme.text-muted;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Rectangle {
+                            background: #141414;
+                            border-color: #333333;
+                            border-width: 1px;
+                            height: 32px;
+                            horizontal-stretch: 1;
+                            Text {
+                                text: root.config.java-path == "" ? "Auto-detect / Bundled JRE" : root.config.java-path;
+                                font-size: 11px;
+                                color: McTheme.text-secondary;
+                                overflow: elide;
+                                vertical-alignment: center;
+                                x: 8px;
+                            }
+                        }
+                        McButton {
+                            text: "SELECT";
+                            font-size: 10px;
+                            clicked => { root.browse-java-clicked(); }
+                        }
+                    }
+                }
+                
+                VerticalLayout {
+                    spacing: 6px;
+                    width: 220px;
+                    Text {
+                        text: "DISPLAY & RESOLUTION";
+                        font-size: 11px;
+                        font-weight: 700;
+                        color: McTheme.text-muted;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        McButton {
+                            text: root.config.fullscreen ? "[X] FULLSCREEN" : "[ ] FULLSCREEN";
+                            primary: root.config.fullscreen;
+                            font-size: 10px;
+                            clicked => { root.config.fullscreen = !root.config.fullscreen; }
+                        }
+                        Rectangle {
+                            background: #141414;
+                            border-color: #333333;
+                            border-width: 1px;
+                            height: 32px;
+                            horizontal-stretch: 1;
+                            Text {
+                                text: root.config.resolution-width + "x" + root.config.resolution-height;
+                                font-size: 11px;
+                                color: McTheme.text-secondary;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Behavior on Launch
+            VerticalLayout {
+                spacing: 6px;
+                Text {
+                    text: "ON LAUNCH BEHAVIOR:";
+                    font-size: 11px;
+                    font-weight: 700;
+                    color: McTheme.text-muted;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    McButton {
+                        text: root.config.close-behavior == 0 ? "● HIDE & REOPEN" : "○ HIDE & REOPEN";
+                        primary: root.config.close-behavior == 0;
+                        font-size: 10px;
+                        clicked => { root.config.close-behavior = 0; }
+                    }
+                    McButton {
+                        text: root.config.close-behavior == 2 ? "● CLOSE LAUNCHER (0 MB)" : "○ CLOSE LAUNCHER (0 MB)";
+                        primary: root.config.close-behavior == 2;
+                        font-size: 10px;
+                        clicked => { root.config.close-behavior = 2; }
+                    }
+                    McButton {
+                        text: root.config.close-behavior == 1 ? "● KEEP OPEN" : "○ KEEP OPEN";
+                        primary: root.config.close-behavior == 1;
+                        font-size: 10px;
+                        clicked => { root.config.close-behavior = 1; }
+                    }
+                }
+            }
+            
+            // Toggles
+            HorizontalLayout {
+                spacing: 12px;
+                McButton {
+                    text: root.config.discord-rpc ? "[X] DISCORD RPC STATUS" : "[ ] DISCORD RPC STATUS";
+                    primary: root.config.discord-rpc;
+                    font-size: 10px;
+                    clicked => { root.config.discord-rpc = !root.config.discord-rpc; }
+                }
+                McButton {
+                    text: root.config.keep-user-mods ? "[X] PRESERVE USER-ADDED MODS" : "[ ] PRESERVE USER-ADDED MODS";
+                    primary: root.config.keep-user-mods;
+                    font-size: 10px;
+                    clicked => { root.config.keep-user-mods = !root.config.keep-user-mods; }
+                }
+            }
+            
+            HorizontalLayout {
+                spacing: 12px;
+                alignment: end;
+                McButton {
+                    text: "SAVE CONFIG";
+                    primary: true;
+                    clicked => { root.save-clicked(); }
+                }
+                McButton {
+                    text: "CANCEL";
+                    clicked => { root.close-clicked(); }
+                }
+            }
+        }
+    }
+}

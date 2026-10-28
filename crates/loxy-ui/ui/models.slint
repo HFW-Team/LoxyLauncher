@@ -1,0 +1,80 @@
+export struct ServerStatusData {
+    online: bool,
+    motd: string,
+    players-online: int,
+    players-max: int,
+    latency-ms: int,
+}
+
+export struct AccountData {
+    logged-in: bool,
+    username: string,
+    uuid: string,
+}
+
+export struct ModpackData {
+    name: string,
+    version: string,
+    mc-version: string,
+    loader: string,
+    loader-version: string,
+    server-host: string,
+    server-port: int,
+    update-available: bool,
+}
+
+export struct ConfigData {
+    instance-dir: string,
+    shared-dir: string,
+    min-ram-mb: int,
+    max-ram-mb: int,
+    jvm-args: string,
+    java-path: string,
+    resolution-width: int,
+    resolution-height: int,
+    fullscreen: bool,
+    close-behavior: int, // 0 = HideAndReopen, 1 = KeepOpen, 2 = CloseLauncher
+    discord-rpc: bool,
+    keep-user-mods: bool,
+    azure-client-id: string,
+    total-system-ram-mb: int,
+}
+
+export struct ProgressData {
+    active: bool,
+    stage: string,
+    current-file: string,
+    completed: int,
+    total: int,
+    percent: int,
+}
+
+export struct LogEntryData {
+    timestamp: string,
+    level: string,
+    line: string,
+}
+
+export struct ModHitData {
+    project-id: string,
+    slug: string,
+    title: string,
+    description: string,
+    author: string,
+    downloads: int,
+    installed: bool,
+}
+
+export struct ModVersionData {
+    id: string,
+    version-number: string,
+    game-versions: string,
+    loaders: string,
+}
+
+export struct InstalledModData {
+    filename: string,
+    display-name: string,
+    is-disabled: bool,
+    is-user-added: bool,
+}

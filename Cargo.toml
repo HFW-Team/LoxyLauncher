@@ -2,5 +2,5 @@
 resolver = "2"
 members = [
     "crates/loxy-core",
-    "src-tauri",
+    "crates/loxy-ui",
 ]

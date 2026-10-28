@@ -1,0 +1,466 @@
+import { McTheme, McButton } from "theme.slint";
+import { ServerStatusData, AccountData, ModpackData, ConfigData, ProgressData, LogEntryData, ModHitData, InstalledModData } from "models.slint";
+import { ServerCard, AccountPill, DashboardCard } from "components/cards.slint";
+import { AuthDialog } from "dialogs/auth.slint";
+import { RamDialog } from "dialogs/ram.slint";
+import { SettingsDialog } from "dialogs/settings.slint";
+import { ModsDialog } from "dialogs/mods.slint";
+import { ConsoleDialog } from "dialogs/console.slint";
+
+export component MainWindow inherits Window {
+    title: "LoxyLauncher (Native)";
+    min-width: 960px;
+    min-height: 620px;
+    preferred-width: 1040px;
+    preferred-height: 660px;
+    background: McTheme.background;
+    
+    // Core State Properties
+    in property <ServerStatusData> server-status: {
+        online: false,
+        motd: "Pinging server...",
+        players-online: 0,
+        players-max: 0,
+        latency-ms: 0,
+    };
+    
+    in property <AccountData> account: {
+        logged-in: false,
+        username: "Player",
+        uuid: "",
+    };
+    
+    in property <ModpackData> modpack: {
+        name: "Loxy Modpack",
+        version: "1.0.0",
+        mc-version: "1.21.1",
+        loader: "Fabric",
+        loader-version: "0.16.9",
+        server-host: "play.loxy.community",
+        server-port: 25565,
+        update-available: false,
+    };
+    
+    in-out property <ConfigData> config: {
+        instance-dir: "",
+        shared-dir: "",
+        min-ram-mb: 2048,
+        max-ram-mb: 6144,
+        jvm-args: "",
+        java-path: "",
+        resolution-width: 1280,
+        resolution-height: 720,
+        fullscreen: false,
+        close-behavior: 0,
+        discord-rpc: true,
+        keep-user-mods: true,
+        azure-client-id: "",
+        total-system-ram-mb: 16384,
+    };
+    
+    in property <ProgressData> progress: {
+        active: false,
+        stage: "Idle",
+        current-file: "",
+        completed: 0,
+        total: 100,
+        percent: 0,
+    };
+    
+    in property <string> status-banner-text: "";
+    in property <bool> is-launching: false;
+    
+    // Dialogs Open States
+    in-out property <bool> auth-open: false;
+    in-out property <bool> ram-open: false;
+    in-out property <bool> settings-open: false;
+    in-out property <bool> mods-open: false;
+    in-out property <bool> console-open: false;
+    
+    // Auth Dialog Properties
+    in property <string> auth-user-code: "";
+    in property <string> auth-verification-uri: "";
+    in property <string> auth-status: "";
+    in property <bool> auth-code-copied: false;
+    
+    // Console Dialog Properties
+    in property <[LogEntryData]> console-logs: [];
+    in property <int> console-error-count: 0;
+    in-out property <string> console-filter: "ALL";
+    in property <bool> console-logs-copied: false;
+    
+    // Mods Dialog Properties
+    in property <[ModHitData]> mod-search-results: [];
+    in property <bool> mod-is-searching: false;
+    in property <[InstalledModData]> installed-mods: [];
+    
+    // Callbacks to Rust Backend
+    callback play-clicked();
+    callback ping-clicked();
+    callback login-clicked();
+    callback logout-clicked();
+    callback copy-auth-code-clicked();
+    callback open-auth-browser-clicked();
+    callback save-ram-clicked(int);
+    callback save-settings-clicked();
+    callback browse-instance-clicked();
+    callback browse-shared-clicked();
+    callback browse-java-clicked();
+    callback copy-console-logs-clicked();
+    callback clear-console-logs-clicked();
+    callback mod-search-triggered(string);
+    callback mod-install-clicked(string);
+    callback mod-toggle-clicked(string);
+    callback mod-delete-clicked(string);
+    
+    // Window Layout
+    VerticalLayout {
+        padding: 20px;
+        spacing: 16px;
+        
+        // 1. Header Bar
+        HorizontalLayout {
+            spacing: 16px;
+            alignment: space-between;
+            
+            // Brand Title
+            HorizontalLayout {
+                spacing: 10px;
+                alignment: start;
+                
+                Rectangle {
+                    width: 36px;
+                    height: 36px;
+                    background: #2e7d32;
+                    border-color: #4caf50;
+                    border-width: 1px;
+                    
+                    Text {
+                        text: "L";
+                        font-size: 20px;
+                        font-weight: 700;
+                        color: #ffffff;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 2px;
+                    
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: "LOXY LAUNCHER";
+                            font-size: 16px;
+                            font-weight: 700;
+                            color: McTheme.text-primary;
+                            letter-spacing: 0.5px;
+                        }
+                        Rectangle {
+                            background: #222222;
+                            border-color: #383838;
+                            border-width: 1px;
+                            height: 18px;
+                            y: (parent.height - self.height) / 2;
+                            Text {
+                                text: "NATIVE v0.1.0";
+                                font-size: 9px;
+                                font-weight: 700;
+                                color: #81c784;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                    
+                    Text {
+                        text: "Dedicated Lightweight Minecraft Client";
+                        font-size: 11px;
+                        color: McTheme.text-muted;
+                    }
+                }
+            }
+            
+            // Server Status Card & Account Pill
+            HorizontalLayout {
+                spacing: 12px;
+                alignment: end;
+                
+                ServerCard {
+                    width: 320px;
+                    server: root.server-status;
+                    ping-clicked => { root.ping-clicked(); }
+                }
+                
+                AccountPill {
+                    width: 250px;
+                    account: root.account;
+                    login-clicked => { root.login-clicked(); }
+                    logout-clicked => { root.logout-clicked(); }
+                }
+            }
+        }
+        
+        // 2. Middle Content Grid
+        VerticalLayout {
+            vertical-stretch: 1;
+            spacing: 16px;
+            alignment: space-between;
+            
+            // Modpack Banner Header
+            Rectangle {
+                background: #181818;
+                border-color: #2e2e2e;
+                border-width: 1px;
+                height: 100px;
+                
+                HorizontalLayout {
+                    padding: 16px;
+                    alignment: space-between;
+                    
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 6px;
+                        
+                        HorizontalLayout {
+                            spacing: 10px;
+                            Text {
+                                text: root.modpack.name;
+                                font-size: 22px;
+                                font-weight: 700;
+                                color: McTheme.text-primary;
+                            }
+                            
+                            Rectangle {
+                                background: root.modpack.update-available ? #f57f17 : #2e7d32;
+                                border-color: root.modpack.update-available ? #ffb300 : #4caf50;
+                                border-width: 1px;
+                                height: 20px;
+                                y: (parent.height - self.height) / 2;
+                                Text {
+                                    text: root.modpack.update-available ? "UPDATE AVAILABLE" : "VERIFIED & READY";
+                                    font-size: 10px;
+                                    font-weight: 700;
+                                    color: #ffffff;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                        
+                        Text {
+                            text: "Minecraft " + root.modpack.mc-version + " • " + root.modpack.loader + " " + root.modpack.loader-version + " • Server: " + root.modpack.server-host;
+                            font-size: 12px;
+                            color: McTheme.text-secondary;
+                        }
+                    }
+                    
+                    McButton {
+                        text: "REFRESH PACK";
+                        font-size: 11px;
+                        clicked => { root.ping-clicked(); }
+                    }
+                }
+            }
+            
+            // 4 Dashboard Cards Grid
+            HorizontalLayout {
+                spacing: 14px;
+                
+                DashboardCard {
+                    horizontal-stretch: 1;
+                    category: "ALLOCATED RAM";
+                    title: (root.config.max-ram-mb / 1024) + " GB";
+                    subtitle: root.config.max-ram-mb + " MB (Click to adjust)";
+                    is-clickable: true;
+                    clicked => { root.ram-open = true; }
+                }
+                
+                DashboardCard {
+                    horizontal-stretch: 1;
+                    category: "JAVA RUNTIME";
+                    title: root.config.java-path == "" ? "Auto-detect" : "Custom JDK";
+                    subtitle: "Configured in Settings";
+                    is-clickable: true;
+                    clicked => { root.settings-open = true; }
+                }
+                
+                DashboardCard {
+                    horizontal-stretch: 1;
+                    category: "DISPLAY RESOLUTION";
+                    title: root.config.fullscreen ? "Fullscreen" : (root.config.resolution-width + "x" + root.config.resolution-height);
+                    subtitle: root.config.fullscreen ? "Native Display" : "Windowed Mode";
+                    is-clickable: true;
+                    clicked => { root.settings-open = true; }
+                }
+                
+                DashboardCard {
+                    horizontal-stretch: 1;
+                    category: "ACTIVE MODS";
+                    title: root.installed-mods.length + " Installed";
+                    subtitle: "Manage or add mods";
+                    is-clickable: true;
+                    clicked => { root.mods-open = true; }
+                }
+            }
+            
+            // Status Banner / Progress Indicator
+            if root.progress.active : Rectangle {
+                background: #181818;
+                border-color: #333333;
+                border-width: 1px;
+                height: 54px;
+                
+                VerticalLayout {
+                    padding: 8px;
+                    spacing: 6px;
+                    alignment: center;
+                    
+                    HorizontalLayout {
+                        alignment: space-between;
+                        Text {
+                            text: root.progress.stage + " (" + root.progress.current-file + ")";
+                            font-size: 11px;
+                            color: McTheme.text-primary;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: root.progress.percent + "%";
+                            font-size: 11px;
+                            font-weight: 700;
+                            color: #4caf50;
+                        }
+                    }
+                    
+                    // Bar
+                    Rectangle {
+                        height: 8px;
+                        background: #111111;
+                        border-radius: 4px;
+                        
+                        Rectangle {
+                            x: 0;
+                            width: parent.width * (root.progress.percent / 100);
+                            height: parent.height;
+                            background: #2e7d32;
+                            border-radius: 4px;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // 3. Bottom Launch Footer
+        HorizontalLayout {
+            spacing: 16px;
+            alignment: space-between;
+            
+            // Left Quick Actions
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                
+                McButton {
+                    text: "MODS";
+                    clicked => { root.mods-open = true; }
+                }
+                
+                McButton {
+                    text: "SETTINGS";
+                    clicked => { root.settings-open = true; }
+                }
+                
+                McButton {
+                    text: root.console-error-count > 0 ? ("CONSOLE (" + root.console-error-count + " ERRORS)") : "CONSOLE";
+                    danger: root.console-error-count > 0;
+                    clicked => { root.console-open = true; }
+                }
+            }
+            
+            // Center Big Play Button
+            McButton {
+                text: root.is-launching ? "LAUNCHING MINECRAFT..." : (root.modpack.update-available ? "↻ UPDATE & PLAY" : "► PLAY");
+                primary: true;
+                disabled: root.is-launching || !root.account.logged-in;
+                font-size: 15px;
+                h-padding: 36px;
+                v-padding: 14px;
+                clicked => { root.play-clicked(); }
+            }
+            
+            // Right Status Info
+            VerticalLayout {
+                alignment: center;
+                Text {
+                    text: !root.account.logged-in ? "Sign in to play" : (root.status-banner-text != "" ? root.status-banner-text : "Ready to launch");
+                    font-size: 12px;
+                    font-weight: 700;
+                    color: !root.account.logged-in ? #e57373 : #81c784;
+                    horizontal-alignment: end;
+                }
+            }
+        }
+    }
+    
+    // Modal Overlays
+    AuthDialog {
+        is-open <=> root.auth-open;
+        user-code: root.auth-user-code;
+        direct-verification-uri: root.auth-verification-uri;
+        status-text: root.auth-status;
+        code-copied: root.auth-code-copied;
+        copy-code-clicked => { root.copy-auth-code-clicked(); }
+        open-browser-clicked => { root.open-auth-browser-clicked(); }
+        close-clicked => { root.auth-open = false; }
+    }
+    
+    RamDialog {
+        is-open <=> root.ram-open;
+        max-ram-mb <=> root.config.max-ram-mb;
+        min-ram-mb <=> root.config.min-ram-mb;
+        system-total-mb: root.config.total-system-ram-mb;
+        save-clicked => {
+            root.ram-open = false;
+            root.save-ram-clicked(root.config.max-ram-mb);
+        }
+        close-clicked => { root.ram-open = false; }
+    }
+    
+    SettingsDialog {
+        is-open <=> root.settings-open;
+        config <=> root.config;
+        browse-instance-clicked => { root.browse-instance-clicked(); }
+        browse-shared-clicked => { root.browse-shared-clicked(); }
+        browse-java-clicked => { root.browse-java-clicked(); }
+        save-clicked => {
+            root.settings-open = false;
+            root.save-settings-clicked();
+        }
+        close-clicked => { root.settings-open = false; }
+    }
+    
+    ModsDialog {
+        is-open <=> root.mods-open;
+        search-results: root.mod-search-results;
+        is-searching: root.mod-is-searching;
+        installed-mods: root.installed-mods;
+        search-triggered(q) => { root.mod-search-triggered(q); }
+        install-mod-clicked(id) => { root.mod-install-clicked(id); }
+        toggle-mod-clicked(f) => { root.mod-toggle-clicked(f); }
+        delete-mod-clicked(f) => { root.mod-delete-clicked(f); }
+        close-clicked => { root.mods-open = false; }
+    }
+    
+    ConsoleDialog {
+        is-open <=> root.console-open;
+        logs: root.console-logs;
+        error-count: root.console-error-count;
+        filter-level <=> root.console-filter;
+        logs-copied: root.console-logs-copied;
+        copy-logs-clicked => { root.copy-console-logs-clicked(); }
+        clear-logs-clicked => { root.clear-console-logs-clicked(); }
+        close-clicked => { root.console-open = false; }
+    }
+}
