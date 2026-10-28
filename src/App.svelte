@@ -18,6 +18,7 @@
     GameLogEntry,
     GameExitEvent,
     ModrinthSearchHit,
+    ModrinthVersionItem,
     InstalledModEntry,
   } from "./lib/types";
 
@@ -101,10 +102,27 @@
   // Modrinth Browser & Installed Mods State
   let modsTab = $state<"browse" | "installed">("browse");
   let modSearchQuery = $state("");
+  let modFilterVersion = $state("1.21.1");
+  let modFilterLoader = $state("fabric");
+  let modSortIndex = $state<"relevance" | "downloads" | "follows" | "newest" | "updated">("relevance");
+  let modSearchFilterInitialized = $state(false);
+
   let modSearchResults = $state<ModrinthSearchHit[]>([]);
   let isSearchingMods = $state(false);
+  let searchSeq = 0;
+  let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Version Picker Dropdown State per Mod Project ID
+  let expandedProjectVersions = $state<Record<string, boolean>>({});
+  let loadingProjectVersions = $state<Record<string, boolean>>({});
+  let projectVersionsMap = $state<Record<string, ModrinthVersionItem[]>>({});
   let installingProjectIds = $state<Record<string, boolean>>({});
+
+  // Installed Mods & Collapsible Group State
   let installedMods = $state<InstalledModEntry[]>([]);
+  let installedSearchFilter = $state("");
+  let userModsCollapsed = $state(false);
+  let packModsCollapsed = $state(false);
   let modsModalNotice = $state<string | null>(null);
 
   // Updater State
@@ -122,6 +140,17 @@
   );
 
   let errorCount = $derived(logs.filter((l) => l.level === "ERROR").length);
+
+  let filteredInstalledMods = $derived(
+    installedSearchFilter.trim() === ""
+      ? installedMods
+      : installedMods.filter((m) =>
+          m.filename.toLowerCase().includes(installedSearchFilter.trim().toLowerCase())
+        )
+  );
+
+  let userAddedMods = $derived(filteredInstalledMods.filter((m) => m.is_user_mod));
+  let modpackMods = $derived(filteredInstalledMods.filter((m) => !m.is_user_mod));
 
   function attachDialogLightDismissFallback(dialogEl: HTMLDialogElement | undefined) {
     if (!dialogEl) return;
@@ -162,7 +191,7 @@
         detectedJavas = init.detected_javas ?? [];
 
         const existingLogs = await invoke<GameLogEntry[]>("get_game_logs");
-        logs = existingLogs;
+        logs = existingLogs.slice(-500);
 
         await refreshManifestAndServer();
       } catch (err) {
@@ -177,8 +206,12 @@
       syncProgress = ev.payload;
     });
 
+    const unlistenManifestSynced = listen<ManifestCheckResult>("manifest-synced", (ev) => {
+      manifestCheck = ev.payload;
+    });
+
     const unlistenLog = listen<GameLogEntry>("game-log", (ev) => {
-      logs = [...logs.slice(-2499), ev.payload];
+      logs = [...logs.slice(-499), ev.payload];
     });
 
     const unlistenExit = listen<GameExitEvent>("game-exited", (ev) => {
@@ -200,6 +233,7 @@
 
     return () => {
       unlistenSync.then((fn) => fn());
+      unlistenManifestSynced.then((fn) => fn());
       unlistenLog.then((fn) => fn());
       unlistenExit.then((fn) => fn());
     };
@@ -211,6 +245,11 @@
       const dash = await invoke<DashboardStatus>("check_manifest_and_server");
       manifestCheck = dash.manifest_check;
       serverStatus = dash.server_status;
+      if (!modSearchFilterInitialized) {
+        modFilterVersion = dash.manifest_check.manifest.minecraft_version;
+        modFilterLoader = dash.manifest_check.manifest.loader;
+        modSearchFilterInitialized = true;
+      }
       if (dash.manifest_check.is_offline_fallback && dash.manifest_check.offline_warning) {
         statusBanner = {
           type: "warn",
@@ -336,6 +375,11 @@
 
   async function openModsModal() {
     modsModalNotice = null;
+    if (!modSearchFilterInitialized) {
+      modFilterVersion = manifestCheck.manifest.minecraft_version;
+      modFilterLoader = manifestCheck.manifest.loader;
+      modSearchFilterInitialized = true;
+    }
     modsDialog?.showModal();
     await loadInstalledMods();
     if (modSearchResults.length === 0) {
@@ -351,43 +395,85 @@
     }
   }
 
+  function triggerRealtimeModSearch() {
+    if (searchDebounceTimer) {
+      clearTimeout(searchDebounceTimer);
+    }
+    searchDebounceTimer = setTimeout(() => {
+      handleSearchModrinth();
+    }, 180);
+  }
+
   async function handleSearchModrinth(e?: Event) {
     if (e) e.preventDefault();
+    const mySeq = ++searchSeq;
     isSearchingMods = true;
-    modsModalNotice = null;
     try {
-      modSearchResults = await invoke<ModrinthSearchHit[]>("search_mods_on_modrinth", {
+      const hits = await invoke<ModrinthSearchHit[]>("search_mods_on_modrinth", {
         query: modSearchQuery,
-        mcVersion: manifestCheck.manifest.minecraft_version,
-        loader: manifestCheck.manifest.loader,
+        mcVersion: modFilterVersion,
+        loader: modFilterLoader,
+        sortIndex: modSortIndex,
       });
+      if (mySeq === searchSeq) {
+        modSearchResults = hits;
+      }
     } catch (err) {
-      modsModalNotice = `Modrinth search error: ${String(err)}`;
+      if (mySeq === searchSeq) {
+        modsModalNotice = `Modrinth search error: ${String(err)}`;
+      }
     } finally {
-      isSearchingMods = false;
+      if (mySeq === searchSeq) {
+        isSearchingMods = false;
+      }
     }
   }
 
-  async function handleInstallModrinthMod(hit: ModrinthSearchHit) {
-    installingProjectIds = { ...installingProjectIds, [hit.project_id]: true };
+  async function toggleModVersionDropdown(projectId: string) {
+    const isCurrentlyOpen = !!expandedProjectVersions[projectId];
+    if (isCurrentlyOpen) {
+      expandedProjectVersions = { ...expandedProjectVersions, [projectId]: false };
+      return;
+    }
+
+    expandedProjectVersions = { ...expandedProjectVersions, [projectId]: true };
+    loadingProjectVersions = { ...loadingProjectVersions, [projectId]: true };
+
+    try {
+      const vers = await invoke<ModrinthVersionItem[]>("get_mod_versions_on_modrinth", {
+        projectId,
+        mcVersion: modFilterVersion,
+        loader: modFilterLoader,
+      });
+      projectVersionsMap = { ...projectVersionsMap, [projectId]: vers };
+    } catch (err) {
+      modsModalNotice = `Could not load versions: ${String(err)}`;
+    } finally {
+      loadingProjectVersions = { ...loadingProjectVersions, [projectId]: false };
+    }
+  }
+
+  async function handleInstallModrinthMod(hit: ModrinthSearchHit, versionId?: string) {
+    const busyKey = versionId ? `${hit.project_id}:${versionId}` : hit.project_id;
+    installingProjectIds = { ...installingProjectIds, [busyKey]: true, [hit.project_id]: true };
     modsModalNotice = null;
     try {
-      // Automatically ensure keep_user_mods is enabled when installing custom mods
       if (!config.keep_user_mods) {
         config.keep_user_mods = true;
         await invoke("save_launcher_config", { newConfig: config });
       }
       const installed = await invoke<InstalledModEntry>("install_mod_from_modrinth", {
         projectId: hit.project_id,
-        mcVersion: manifestCheck.manifest.minecraft_version,
-        loader: manifestCheck.manifest.loader,
+        versionId: versionId ?? null,
+        mcVersion: modFilterVersion || manifestCheck.manifest.minecraft_version,
+        loader: modFilterLoader || manifestCheck.manifest.loader,
       });
       modsModalNotice = `Installed ${hit.title} (${installed.filename})`;
       await loadInstalledMods();
     } catch (err) {
       modsModalNotice = `Failed to install ${hit.title}: ${String(err)}`;
     } finally {
-      installingProjectIds = { ...installingProjectIds, [hit.project_id]: false };
+      installingProjectIds = { ...installingProjectIds, [busyKey]: false, [hit.project_id]: false };
     }
   }
 
@@ -456,6 +542,8 @@
 
     try {
       await invoke("sync_and_launch_game");
+      manifestCheck.update_available = false;
+      manifestCheck.installed_version = manifestCheck.manifest.version;
     } catch (err) {
       isLaunching = false;
       syncProgress = null;
@@ -848,7 +936,7 @@
             type="button"
             onclick={() => settingsDialog?.showModal()}
             class="mc-inset p-2.5 text-left hover:border-white cursor-pointer transition-colors"
-            title="Click to change resolution"
+            title="Click to change resolution & fullscreen"
           >
             <div class="text-[11px] text-[#999]">DISPLAY</div>
             <div class="text-sm text-white font-bold mt-0.5">
@@ -931,19 +1019,12 @@
       </button>
     </div>
 
-    <!-- Right Column: Quick RAM & Mods Indicators -->
+    <!-- Right Column: Modrinth Mods Quick Button -->
     <div class="flex items-center justify-end gap-2 text-xs text-[#bdbdbd]">
       <button
         type="button"
-        onclick={() => ramDialog?.showModal()}
-        class="mc-btn px-3 py-1.5 text-xs"
-      >
-        RAM: {config.max_ram_mb} MB
-      </button>
-      <button
-        type="button"
         onclick={openModsModal}
-        class="mc-btn px-3 py-1.5 text-xs"
+        class="mc-btn px-3.5 py-2 text-xs"
       >
         MODRINTH MODS
       </button>
@@ -1030,7 +1111,7 @@
   bind:this={modsDialog}
   {...({ closedby: "any" } as any)}
   aria-labelledby="mods-dialog-title"
-  class="mc-panel w-[760px] p-5 text-white"
+  class="mc-panel w-[820px] p-5 text-white"
 >
   <div class="flex items-center justify-between border-b-2 border-[#181818] pb-3 mb-3">
     <div>
@@ -1038,8 +1119,8 @@
         MODRINTH MOD BROWSER & INSTANCE MODS
       </h2>
       <p class="text-xs text-[#aaa]">
-        Targeting Minecraft <strong class="text-[#4fc3f7]">{manifestCheck.manifest.minecraft_version}</strong>
-        • Loader: <strong class="text-[#ce93d8] uppercase">{manifestCheck.manifest.loader}</strong>
+        Pack Target: <strong class="text-[#4fc3f7]">MC {manifestCheck.manifest.minecraft_version}</strong>
+        • <strong class="text-[#ce93d8] uppercase">{manifestCheck.manifest.loader}</strong>
       </p>
     </div>
 
@@ -1082,124 +1163,340 @@
   </div>
 
   {#if modsModalNotice}
-    <div class="mc-inset px-3 py-2 mb-3 text-xs text-[#fde68a] border border-[#f59e0b]">
-      {modsModalNotice}
+    <div class="mc-inset px-3 py-2 mb-3 text-xs text-[#fde68a] border border-[#f59e0b] flex justify-between items-center">
+      <span>{modsModalNotice}</span>
+      <button type="button" onclick={() => (modsModalNotice = null)} class="underline ml-2 cursor-pointer">
+        DISMISS
+      </button>
     </div>
   {/if}
 
   {#if modsTab === "browse"}
-    <!-- Modrinth Search Bar -->
-    <form onsubmit={handleSearchModrinth} class="flex gap-2 mb-3">
-      <input
-        type="text"
-        placeholder="Search mods on Modrinth (e.g. Sodium, Iris, Journeymap, Zoomify)..."
-        bind:value={modSearchQuery}
-        class="flex-1 bg-[#121212] border-2 border-[#444] px-3 py-2 text-sm text-white"
-      />
-      <button
-        type="submit"
-        disabled={isSearchingMods}
-        class="mc-btn mc-btn-green px-5 py-2 text-xs font-bold"
-      >
-        {isSearchingMods ? "SEARCHING..." : "SEARCH"}
-      </button>
-    </form>
+    <!-- Real-Time Search & Filters Bar (Aligned cleanly with results box) -->
+    <div class="mc-inset p-3 mb-3 space-y-2.5">
+      <div class="flex items-center gap-2">
+        <input
+          type="text"
+          placeholder="Type to search Modrinth in real time (e.g. Sodium, Iris, Journeymap, Zoomify)..."
+          bind:value={modSearchQuery}
+          oninput={triggerRealtimeModSearch}
+          class="flex-1 bg-[#1b1b1b] border border-[#444] px-3 py-2 text-sm text-white focus:border-[#66bb6a] outline-none"
+        />
+        {#if modSearchQuery.length > 0}
+          <button
+            type="button"
+            onclick={() => {
+              modSearchQuery = "";
+              triggerRealtimeModSearch();
+            }}
+            class="mc-btn px-3 py-2 text-xs"
+          >
+            CLEAR
+          </button>
+        {/if}
+      </div>
+
+      <!-- Filter Controls: MC Version Override, Loader, Sort Order -->
+      <div class="grid grid-cols-12 gap-2.5 items-center text-xs">
+        <div class="col-span-5 flex items-center gap-1.5">
+          <label for="mod-ver-override" class="text-[#aaa] shrink-0">MC Version:</label>
+          <input
+            id="mod-ver-override"
+            type="text"
+            placeholder="e.g. 1.21.1 or all"
+            bind:value={modFilterVersion}
+            oninput={() => {
+              projectVersionsMap = {};
+              triggerRealtimeModSearch();
+            }}
+            class="w-full bg-[#1b1b1b] border border-[#444] px-2 py-1 text-white font-mc-mono text-xs"
+          />
+          <button
+            type="button"
+            onclick={() => {
+              modFilterVersion =
+                modFilterVersion === "all"
+                  ? manifestCheck.manifest.minecraft_version
+                  : "all";
+              projectVersionsMap = {};
+              triggerRealtimeModSearch();
+            }}
+            class="mc-btn px-2 py-1 text-[11px] shrink-0"
+            title="Toggle between pack MC version and All MC versions"
+          >
+            {modFilterVersion === "all" ? "PACK VER" : "ALL"}
+          </button>
+        </div>
+
+        <div class="col-span-3 flex items-center gap-1.5">
+          <label for="mod-loader-filter" class="text-[#aaa] shrink-0">Loader:</label>
+          <select
+            id="mod-loader-filter"
+            bind:value={modFilterLoader}
+            onchange={() => {
+              projectVersionsMap = {};
+              triggerRealtimeModSearch();
+            }}
+            class="w-full bg-[#1b1b1b] border border-[#444] px-2 py-1 text-white text-xs uppercase"
+          >
+            <option value="fabric">Fabric</option>
+            <option value="neoforge">NeoForge</option>
+            <option value="forge">Forge</option>
+            <option value="all">All Loaders</option>
+          </select>
+        </div>
+
+        <div class="col-span-4 flex items-center gap-1.5">
+          <label for="mod-sort-filter" class="text-[#aaa] shrink-0">Sort:</label>
+          <select
+            id="mod-sort-filter"
+            bind:value={modSortIndex}
+            onchange={triggerRealtimeModSearch}
+            class="w-full bg-[#1b1b1b] border border-[#444] px-2 py-1 text-white text-xs"
+          >
+            <option value="relevance">Relevance</option>
+            <option value="downloads">Most Downloads</option>
+            <option value="follows">Most Follows</option>
+            <option value="updated">Recently Updated</option>
+            <option value="newest">Newest</option>
+          </select>
+        </div>
+      </div>
+    </div>
 
     <!-- Search Results List -->
-    <div class="mc-inset p-3 h-[370px] overflow-y-auto space-y-2.5">
-      {#if isSearchingMods}
+    <div class="mc-inset p-3 h-[350px] overflow-y-auto space-y-2.5">
+      {#if isSearchingMods && modSearchResults.length === 0}
         <div class="text-center py-12 text-sm text-[#aaa]">
-          Querying Modrinth API v2 for compatible {manifestCheck.manifest.loader} {manifestCheck.manifest.minecraft_version} mods...
+          Searching Modrinth...
         </div>
       {:else if modSearchResults.length === 0}
         <div class="text-center py-12 text-sm text-[#888]">
-          No mods found matching your query for MC {manifestCheck.manifest.minecraft_version} ({manifestCheck.manifest.loader}).
+          No mods found matching your filters (MC: {modFilterVersion || "all"}, Loader: {modFilterLoader}).
         </div>
       {:else}
         {#each modSearchResults as hit}
-          <div class="bg-[#1c1c1c] border border-[#333] p-3 flex items-center justify-between gap-3">
-            <div class="flex items-center gap-3 min-w-0">
-              {#if hit.icon_url}
-                <img
-                  src={hit.icon_url}
-                  alt={hit.title}
-                  class="w-11 h-11 bg-[#111] border border-black shrink-0 object-cover"
-                />
-              {:else}
-                <div class="w-11 h-11 bg-[#111] border border-black shrink-0 flex items-center justify-center text-xs text-[#666]">
-                  MOD
+          <div class="bg-[#1c1c1c] border border-[#333] p-3 flex flex-col gap-2">
+            <div class="flex items-center justify-between gap-3">
+              <div class="flex items-center gap-3 min-w-0 flex-1">
+                {#if hit.icon_url}
+                  <img
+                    src={hit.icon_url}
+                    alt={hit.title}
+                    class="w-11 h-11 bg-[#111] border border-black shrink-0 object-cover"
+                  />
+                {:else}
+                  <div class="w-11 h-11 bg-[#111] border border-black shrink-0 flex items-center justify-center text-xs text-[#666]">
+                    MOD
+                  </div>
+                {/if}
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center gap-2">
+                    <span class="font-bold text-sm text-white truncate">{hit.title}</span>
+                    <span class="text-xs text-[#888] truncate">by {hit.author}</span>
+                    <span class="text-[11px] text-[#66bb6a] ml-auto shrink-0">
+                      {hit.downloads.toLocaleString()} dl
+                    </span>
+                  </div>
+                  <p class="text-xs text-[#bdbdbd] line-clamp-2 mt-0.5">
+                    {hit.description}
+                  </p>
                 </div>
-              {/if}
-              <div class="min-w-0">
-                <div class="flex items-center gap-2">
-                  <span class="font-bold text-sm text-white truncate">{hit.title}</span>
-                  <span class="text-xs text-[#888]">by {hit.author}</span>
-                </div>
-                <p class="text-xs text-[#bdbdbd] line-clamp-2 mt-0.5">
-                  {hit.description}
-                </p>
+              </div>
+
+              <!-- Split Install Button + Slim Version Selector Arrow Button -->
+              <div class="flex items-stretch shrink-0">
+                <button
+                  type="button"
+                  disabled={installingProjectIds[hit.project_id]}
+                  onclick={() => handleInstallModrinthMod(hit)}
+                  class="mc-btn mc-btn-green px-3.5 py-2 text-xs"
+                  title="Install latest matching version"
+                >
+                  {installingProjectIds[hit.project_id] ? "INSTALLING..." : "+ INSTALL"}
+                </button>
+                <button
+                  type="button"
+                  onclick={() => toggleModVersionDropdown(hit.project_id)}
+                  class="mc-btn mc-btn-green px-2 py-2 text-xs border-l-0"
+                  title="Select another or older version"
+                  aria-label="Select Mod Version"
+                >
+                  {expandedProjectVersions[hit.project_id] ? "▲" : "▼"}
+                </button>
               </div>
             </div>
 
-            <button
-              type="button"
-              disabled={installingProjectIds[hit.project_id]}
-              onclick={() => handleInstallModrinthMod(hit)}
-              class="mc-btn mc-btn-green px-3.5 py-2 text-xs shrink-0"
-            >
-              {installingProjectIds[hit.project_id] ? "INSTALLING..." : "+ INSTALL"}
-            </button>
+            <!-- Expandable Version Picker Drawer -->
+            {#if expandedProjectVersions[hit.project_id]}
+              <div class="mc-inset p-2.5 mt-1 max-h-44 overflow-y-auto space-y-1.5 text-xs">
+                <div class="text-[11px] text-[#aaa] font-bold border-b border-[#2b2b2b] pb-1">
+                  Select Version for {hit.title} (Filter: MC {modFilterVersion || "all"} / {modFilterLoader}):
+                </div>
+                {#if loadingProjectVersions[hit.project_id]}
+                  <div class="text-[#888] py-2 text-center">Loading versions from Modrinth...</div>
+                {:else if !projectVersionsMap[hit.project_id] || projectVersionsMap[hit.project_id].length === 0}
+                  <div class="text-[#888] py-2 text-center">
+                    No versions matched filter. Try setting MC Version filter to "ALL" above.
+                  </div>
+                {:else}
+                  {#each projectVersionsMap[hit.project_id] as ver}
+                    <div class="flex items-center justify-between gap-2 bg-[#181818] px-2.5 py-1.5 border border-[#2c2c2c]">
+                      <div class="min-w-0">
+                        <div class="font-bold text-white truncate">
+                          {ver.version_number}
+                          <span class="font-normal text-[#999]">({ver.name})</span>
+                        </div>
+                        <div class="text-[11px] text-[#888] truncate">
+                          MC: {ver.game_versions.join(", ")} • {ver.loaders.join(", ")} • {ver.date_published}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={installingProjectIds[`${hit.project_id}:${ver.id}`]}
+                        onclick={() => handleInstallModrinthMod(hit, ver.id)}
+                        class="mc-btn px-2.5 py-1 text-xs shrink-0"
+                      >
+                        {installingProjectIds[`${hit.project_id}:${ver.id}`]
+                          ? "..."
+                          : `INSTALL v${ver.version_number}`}
+                      </button>
+                    </div>
+                  {/each}
+                {/if}
+              </div>
+            {/if}
           </div>
         {/each}
       {/if}
     </div>
   {:else}
-    <!-- Installed Mods List -->
-    <div class="mc-inset p-3 h-[420px] overflow-y-auto space-y-2">
-      {#if installedMods.length === 0}
-        <div class="text-center py-12 text-sm text-[#888]">
-          No mods found in {config.instance_dir}/mods yet.
-        </div>
-      {:else}
-        {#each installedMods as mod}
-          <div class="bg-[#1c1c1c] border border-[#333] px-3 py-2.5 flex items-center justify-between gap-3">
-            <div class="min-w-0">
-              <div class="flex items-center gap-2">
-                <span class="text-sm font-bold {mod.enabled ? 'text-white' : 'text-[#777] line-through'} truncate">
-                  {mod.filename}
-                </span>
-                {#if mod.is_user_mod}
-                  <span class="px-1.5 py-0.5 text-[10px] bg-[#1b5e20] text-[#a5d6a7] border border-[#388e3c]">
-                    USER ADDED
-                  </span>
-                {:else}
-                  <span class="px-1.5 py-0.5 text-[10px] bg-[#263238] text-[#90caf9] border border-[#37474f]">
-                    MODPACK
-                  </span>
-                {/if}
-              </div>
-              <div class="text-xs text-[#888]">{mod.size_kb} KB</div>
-            </div>
+    <!-- Installed Mods Tab with Filter & Collapsible "User Added" / "Modpack" Groups -->
+    <div class="mb-2.5 flex items-center gap-2">
+      <input
+        type="text"
+        placeholder="Filter installed mods by filename..."
+        bind:value={installedSearchFilter}
+        class="flex-1 bg-[#121212] border border-[#444] px-3 py-1.5 text-xs text-white"
+      />
+      <span class="text-xs text-[#888]">
+        {userAddedMods.length} User • {modpackMods.length} Modpack
+      </span>
+    </div>
 
-            <div class="flex items-center gap-2 shrink-0">
-              <button
-                type="button"
-                onclick={() => handleManageInstalledMod(mod.filename, false)}
-                class="mc-btn px-2.5 py-1 text-xs"
-              >
-                {mod.enabled ? "DISABLE" : "ENABLE"}
-              </button>
-              <button
-                type="button"
-                onclick={() => handleManageInstalledMod(mod.filename, true)}
-                class="mc-btn mc-btn-red px-2.5 py-1 text-xs"
-              >
-                DELETE
-              </button>
-            </div>
+    <div class="mc-inset p-3 h-[380px] overflow-y-auto space-y-3">
+      <!-- GROUP 1: USER ADDED MODS -->
+      <div class="border border-[#2e5730] bg-[#141c14]">
+        <button
+          type="button"
+          onclick={() => (userModsCollapsed = !userModsCollapsed)}
+          class="w-full px-3 py-2 bg-[#1b301c] flex items-center justify-between text-xs font-bold text-[#a5d6a7] cursor-pointer hover:bg-[#223d24]"
+        >
+          <span>USER ADDED MODS ({userAddedMods.length})</span>
+          <span>{userModsCollapsed ? "▶ EXPAND" : "▼ COLLAPSE"}</span>
+        </button>
+
+        {#if !userModsCollapsed}
+          <div class="p-2 space-y-1.5">
+            {#if userAddedMods.length === 0}
+              <div class="text-xs text-[#777] py-3 text-center">
+                No custom user-installed mods yet. Use the "Search Modrinth" tab to add mods!
+              </div>
+            {:else}
+              {#each userAddedMods as mod}
+                <div class="bg-[#1c1c1c] border border-[#333] px-3 py-2 flex items-center justify-between gap-3">
+                  <div class="min-w-0">
+                    <div class="flex items-center gap-2">
+                      <span class="text-xs font-bold {mod.enabled ? 'text-white' : 'text-[#777] line-through'} truncate">
+                        {mod.filename}
+                      </span>
+                      <span class="px-1.5 py-0.5 text-[10px] bg-[#1b5e20] text-[#a5d6a7] border border-[#388e3c]">
+                        USER ADDED
+                      </span>
+                    </div>
+                    <div class="text-[11px] text-[#888]">{mod.size_kb} KB</div>
+                  </div>
+
+                  <div class="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onclick={() => handleManageInstalledMod(mod.filename, false)}
+                      class="mc-btn px-2.5 py-1 text-xs"
+                    >
+                      {mod.enabled ? "DISABLE" : "ENABLE"}
+                    </button>
+                    <button
+                      type="button"
+                      onclick={() => handleManageInstalledMod(mod.filename, true)}
+                      class="mc-btn mc-btn-red px-2.5 py-1 text-xs"
+                    >
+                      DELETE
+                    </button>
+                  </div>
+                </div>
+              {/each}
+            {/if}
           </div>
-        {/each}
-      {/if}
+        {/if}
+      </div>
+
+      <!-- SEPARATOR -->
+      <div class="border-t-2 border-[#2a2a2a]"></div>
+
+      <!-- GROUP 2: MODPACK MODS -->
+      <div class="border border-[#2d3e46] bg-[#13181b]">
+        <button
+          type="button"
+          onclick={() => (packModsCollapsed = !packModsCollapsed)}
+          class="w-full px-3 py-2 bg-[#1c282e] flex items-center justify-between text-xs font-bold text-[#90caf9] cursor-pointer hover:bg-[#24343c]"
+        >
+          <span>MODPACK MODS ({modpackMods.length})</span>
+          <span>{packModsCollapsed ? "▶ EXPAND" : "▼ COLLAPSE"}</span>
+        </button>
+
+        {#if !packModsCollapsed}
+          <div class="p-2 space-y-1.5">
+            {#if modpackMods.length === 0}
+              <div class="text-xs text-[#777] py-3 text-center">
+                No modpack-managed mods in folder yet.
+              </div>
+            {:else}
+              {#each modpackMods as mod}
+                <div class="bg-[#1c1c1c] border border-[#333] px-3 py-2 flex items-center justify-between gap-3">
+                  <div class="min-w-0">
+                    <div class="flex items-center gap-2">
+                      <span class="text-xs font-bold {mod.enabled ? 'text-white' : 'text-[#777] line-through'} truncate">
+                        {mod.filename}
+                      </span>
+                      <span class="px-1.5 py-0.5 text-[10px] bg-[#263238] text-[#90caf9] border border-[#37474f]">
+                        MODPACK
+                      </span>
+                    </div>
+                    <div class="text-[11px] text-[#888]">{mod.size_kb} KB</div>
+                  </div>
+
+                  <div class="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onclick={() => handleManageInstalledMod(mod.filename, false)}
+                      class="mc-btn px-2.5 py-1 text-xs"
+                    >
+                      {mod.enabled ? "DISABLE" : "ENABLE"}
+                    </button>
+                    <button
+                      type="button"
+                      onclick={() => handleManageInstalledMod(mod.filename, true)}
+                      class="mc-btn mc-btn-red px-2.5 py-1 text-xs"
+                    >
+                      DELETE
+                    </button>
+                  </div>
+                </div>
+              {/each}
+            {/if}
+          </div>
+        {/if}
+      </div>
     </div>
   {/if}
 
@@ -1511,7 +1808,7 @@
         </div>
         <label class="flex items-center gap-2 pt-1 cursor-pointer">
           <input type="checkbox" bind:checked={config.fullscreen} />
-          <span>Launch in Fullscreen mode</span>
+          <span>Launch in Fullscreen mode (syncs options.txt)</span>
         </label>
       </div>
 

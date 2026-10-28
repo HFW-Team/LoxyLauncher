@@ -7,9 +7,10 @@ use discord::DiscordRpcManager;
 use java::DetectedJava;
 use launcher::{push_log, GameLogEntry, WindowAction};
 use modpack::{
-    fetch_or_fallback_manifest, install_modrinth_mod, list_installed_mods, search_modrinth_mods,
-    synchronize_modpack, toggle_or_delete_installed_mod, InstalledModEntry, ManifestCheckResult,
-    ModLoaderType, ModrinthSearchHit, SyncProgressEvent,
+    fetch_or_fallback_manifest, get_modrinth_mod_versions, install_modrinth_mod,
+    list_installed_mods, search_modrinth_mods, synchronize_modpack,
+    toggle_or_delete_installed_mod, InstalledModEntry, ManifestCheckResult, ModrinthSearchHit,
+    ModrinthVersionItem, SyncProgressEvent,
 };
 use ping::{ping_minecraft_server, ServerStatus};
 use reqwest::Client;
@@ -199,20 +200,45 @@ async fn clear_game_logs(state: State<'_, AppState>) -> Result<(), String> {
 async fn search_mods_on_modrinth(
     state: State<'_, AppState>,
     query: String,
-    mc_version: String,
-    loader: ModLoaderType,
+    mc_version: Option<String>,
+    loader: Option<String>,
+    sort_index: Option<String>,
 ) -> Result<Vec<ModrinthSearchHit>, String> {
-    search_modrinth_mods(&state.http_client, &query, &mc_version, &loader)
-        .await
-        .map_err(|e| e.to_string())
+    search_modrinth_mods(
+        &state.http_client,
+        &query,
+        mc_version.as_deref(),
+        loader.as_deref(),
+        sort_index.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_mod_versions_on_modrinth(
+    state: State<'_, AppState>,
+    project_id: String,
+    mc_version: Option<String>,
+    loader: Option<String>,
+) -> Result<Vec<ModrinthVersionItem>, String> {
+    get_modrinth_mod_versions(
+        &state.http_client,
+        &project_id,
+        mc_version.as_deref(),
+        loader.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn install_mod_from_modrinth(
     state: State<'_, AppState>,
     project_id: String,
+    version_id: Option<String>,
     mc_version: String,
-    loader: ModLoaderType,
+    loader: String,
 ) -> Result<InstalledModEntry, String> {
     let instance_dir = {
         let cfg = state.config.lock().map_err(|e| e.to_string())?;
@@ -221,6 +247,7 @@ async fn install_mod_from_modrinth(
     install_modrinth_mod(
         &state.http_client,
         &project_id,
+        version_id.as_deref(),
         &mc_version,
         &loader,
         &instance_dir,
@@ -330,7 +357,7 @@ async fn sync_and_launch_game(
                 format!("Offline fallback: {}", warn),
             );
         }
-    } else {
+    } else if check.update_available {
         let app_sync = app.clone();
         synchronize_modpack(
             &state.http_client,
@@ -343,6 +370,27 @@ async fn sync_and_launch_game(
         )
         .await
         .map_err(|e| format!("Modpack synchronization failed: {}", e))?;
+
+        check.update_available = false;
+        check.installed_version = Some(check.manifest.version.clone());
+        let _ = app.emit("manifest-synced", check.clone());
+    } else {
+        // Pack is already at the latest version; load cached manifest so loader/MC versions from .mrpack are preserved
+        let cached_path = instance_dir.join("cached-manifest.json");
+        if let Ok(raw) = std::fs::read_to_string(&cached_path) {
+            if let Ok(cached_manifest) = serde_json::from_str(&raw) {
+                check.manifest = cached_manifest;
+            }
+        }
+        push_log(
+            &*emit_log,
+            &state.logs,
+            "INFO",
+            format!(
+                "Modpack {} v{} is already up to date. Skipping sync.",
+                check.manifest.name, check.manifest.version
+            ),
+        );
     }
 
     let _ = app.emit(
@@ -456,6 +504,7 @@ pub fn run() {
             get_game_logs,
             clear_game_logs,
             search_mods_on_modrinth,
+            get_mod_versions_on_modrinth,
             install_mod_from_modrinth,
             get_installed_mods,
             manage_installed_mod,

@@ -152,12 +152,25 @@ struct ModrinthApiProject {
 
 #[derive(Debug, Deserialize)]
 struct ModrinthApiVersion {
+    id: String,
     version_number: String,
     name: String,
     changelog: Option<String>,
+    date_published: Option<String>,
     game_versions: Vec<String>,
     loaders: Vec<String>,
     files: Vec<ModrinthApiVersionFile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModrinthVersionItem {
+    pub id: String,
+    pub version_number: String,
+    pub name: String,
+    pub game_versions: Vec<String>,
+    pub loaders: Vec<String>,
+    pub date_published: String,
+    pub filename: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -378,26 +391,40 @@ async fn resolve_modrinth_project_manifest(
     })
 }
 
-/// Searches Modrinth's official v2 `/search` endpoint for mods compatible with the active Minecraft version & loader.
+/// Searches Modrinth's official v2 `/search` endpoint for mods with optional version, loader, and sort filters.
 pub async fn search_modrinth_mods(
     client: &Client,
     query: &str,
-    mc_version: &str,
-    loader: &ModLoaderType,
+    mc_version: Option<&str>,
+    loader: Option<&str>,
+    sort_index: Option<&str>,
 ) -> Result<Vec<ModrinthSearchHit>> {
-    let loader_cat = loader.as_modrinth_category();
-    let facets = format!(
-        "[[\"project_type:mod\"],[\"versions:{}\"],[\"categories:{}\"]]",
-        mc_version, loader_cat
-    );
+    let mut facet_groups = vec!["[\"project_type:mod\"]".to_string()];
+
+    if let Some(ver) = mc_version {
+        let v = ver.trim();
+        if !v.is_empty() && !v.eq_ignore_ascii_case("all") {
+            facet_groups.push(format!("[\"versions:{}\"]", v));
+        }
+    }
+
+    if let Some(ldr) = loader {
+        let l = ldr.trim().to_lowercase();
+        if !l.is_empty() && l != "all" && l != "any" && l != "vanilla" {
+            facet_groups.push(format!("[\"categories:{}\"]", l));
+        }
+    }
+
+    let facets = format!("[{}]", facet_groups.join(","));
+    let index = sort_index.unwrap_or("relevance");
 
     let resp = client
         .get("https://api.modrinth.com/v2/search")
         .query(&[
             ("query", query),
             ("facets", &facets),
-            ("limit", "20"),
-            ("index", "relevance"),
+            ("limit", "25"),
+            ("index", index),
         ])
         .send()
         .await
@@ -415,15 +442,83 @@ pub async fn search_modrinth_mods(
     Ok(parsed.hits)
 }
 
+/// Fetches available versions for a Modrinth mod so the user can pick a specific/older version from the dropdown.
+pub async fn get_modrinth_mod_versions(
+    client: &Client,
+    project_id: &str,
+    mc_version: Option<&str>,
+    loader: Option<&str>,
+) -> Result<Vec<ModrinthVersionItem>> {
+    let ver_url = format!("https://api.modrinth.com/v2/project/{}/version", project_id);
+    let resp = client
+        .get(&ver_url)
+        .send()
+        .await
+        .with_context(|| format!("Failed to fetch versions for Modrinth mod {}", project_id))?;
+
+    if !resp.status().is_success() {
+        bail!("Modrinth version lookup failed with HTTP {}", resp.status());
+    }
+
+    let versions: Vec<ModrinthApiVersion> = resp.json().await?;
+    let ver_filter = mc_version
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("all"));
+    let loader_filter = loader
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty() && s != "all" && s != "any" && s != "vanilla");
+
+    let mut items = Vec::new();
+    for v in versions {
+        if let Some(vf) = ver_filter {
+            if !v.game_versions.iter().any(|g| g == vf) {
+                continue;
+            }
+        }
+        if let Some(ref lf) = loader_filter {
+            if !v.loaders.iter().any(|l| l.eq_ignore_ascii_case(lf)) {
+                continue;
+            }
+        }
+        let Some(jar_file) = v
+            .files
+            .iter()
+            .find(|f| f.filename.ends_with(".jar") && f.primary == Some(true))
+            .or_else(|| v.files.iter().find(|f| f.filename.ends_with(".jar")))
+        else {
+            continue;
+        };
+
+        items.push(ModrinthVersionItem {
+            id: v.id,
+            version_number: v.version_number,
+            name: v.name,
+            game_versions: v.game_versions,
+            loaders: v.loaders,
+            date_published: v
+                .date_published
+                .unwrap_or_default()
+                .chars()
+                .take(10)
+                .collect(),
+            filename: jar_file.filename.clone(),
+        });
+    }
+
+    Ok(items)
+}
+
 /// Installs a mod from Modrinth (`GET /v2/project/{id}/version`) directly into `<instance_dir>/mods/`.
+/// If `version_id` is specified, installs that exact version; otherwise selects the latest matching version.
 pub async fn install_modrinth_mod(
     client: &Client,
     project_id: &str,
+    version_id: Option<&str>,
     mc_version: &str,
-    loader: &ModLoaderType,
+    loader: &str,
     instance_dir: &Path,
 ) -> Result<InstalledModEntry> {
-    let loader_name = loader.as_modrinth_category();
+    let loader_name = loader.trim().to_lowercase();
     let ver_url = format!("https://api.modrinth.com/v2/project/{}/version", project_id);
 
     let resp = client
@@ -441,27 +536,36 @@ pub async fn install_modrinth_mod(
 
     let versions: Vec<ModrinthApiVersion> = resp.json().await?;
 
-    // Find best matching version for mc_version + loader
-    let matched = versions
-        .iter()
-        .find(|v| {
-            v.game_versions.iter().any(|g| g == mc_version)
-                && v.loaders
+    let matched = if let Some(target_vid) = version_id.filter(|s| !s.trim().is_empty()) {
+        versions
+            .iter()
+            .find(|v| v.id == target_vid || v.version_number == target_vid)
+            .ok_or_else(|| anyhow!("Requested version {} not found on Modrinth", target_vid))?
+    } else {
+        let check_ver = !mc_version.trim().is_empty() && !mc_version.eq_ignore_ascii_case("all");
+        let check_ldr =
+            !loader_name.is_empty() && loader_name != "all" && loader_name != "any" && loader_name != "vanilla";
+
+        versions
+            .iter()
+            .find(|v| {
+                (!check_ver || v.game_versions.iter().any(|g| g == mc_version))
+                    && (!check_ldr || v.loaders.iter().any(|l| l.eq_ignore_ascii_case(&loader_name)))
+            })
+            .or_else(|| {
+                versions
                     .iter()
-                    .any(|l| l.eq_ignore_ascii_case(loader_name))
-        })
-        .or_else(|| {
-            versions
-                .iter()
-                .find(|v| v.game_versions.iter().any(|g| g == mc_version))
-        })
-        .ok_or_else(|| {
-            anyhow!(
-                "No compatible version found on Modrinth for Minecraft {} ({})",
-                mc_version,
-                loader_name
-            )
-        })?;
+                    .find(|v| !check_ver || v.game_versions.iter().any(|g| g == mc_version))
+            })
+            .or_else(|| versions.first())
+            .ok_or_else(|| {
+                anyhow!(
+                    "No compatible version found on Modrinth for Minecraft {} ({})",
+                    mc_version,
+                    loader_name
+                )
+            })?
+    };
 
     let jar_file = matched
         .files
@@ -1026,10 +1130,10 @@ where
 
         let mr_index = extract_mrpack_and_parse_index(&mrpack_dest, instance_dir)?;
 
-        if !mr_index.name.is_empty() {
+        if !mr_index.name.is_empty() && manifest.name == "Loxy Private Pack" {
             manifest.name = mr_index.name;
         }
-        if !mr_index.version_id.is_empty() {
+        if manifest.version.is_empty() && !mr_index.version_id.is_empty() {
             manifest.version = mr_index.version_id;
         }
         if let Some(mc_ver) = mr_index.dependencies.get("minecraft") {

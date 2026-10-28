@@ -8,7 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "tauri": "tauri"
+    "tauri": "PATH=\"$PWD/scripts/bin:$PATH\" NO_STRIP=true tauri"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.2.0",

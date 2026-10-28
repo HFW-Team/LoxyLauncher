@@ -134,6 +134,16 @@ export interface ModrinthSearchHit {
   follows: number;
 }
 
+export interface ModrinthVersionItem {
+  id: string;
+  version_number: string;
+  name: string;
+  game_versions: string[];
+  loaders: string[];
+  date_published: string;
+  filename: string;
+}
+
 export interface InstalledModEntry {
   filename: string;
   enabled: boolean;

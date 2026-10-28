@@ -128,6 +128,37 @@ fn classify_log_level(line: &str) -> &'static str {
     }
 }
 
+/// Ensures `<instance_dir>/options.txt` has `fullscreen:true` or `fullscreen:false` matching
+/// the launcher's fullscreen toggle, preventing Minecraft from staying stuck in fullscreen
+/// if the user quit while in fullscreen mode.
+pub fn sync_minecraft_options_txt(instance_dir: &Path, fullscreen: bool) {
+    let options_path = instance_dir.join("options.txt");
+    let target_line = format!("fullscreen:{}", if fullscreen { "true" } else { "false" });
+
+    if let Ok(existing) = fs::read_to_string(&options_path) {
+        let mut found = false;
+        let mut updated_lines: Vec<String> = existing
+            .lines()
+            .map(|line| {
+                if line.starts_with("fullscreen:") {
+                    found = true;
+                    target_line.clone()
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect();
+        if !found {
+            updated_lines.push(target_line);
+        }
+        let mut out = updated_lines.join("\n");
+        out.push('\n');
+        let _ = fs::write(&options_path, out);
+    } else if fullscreen {
+        let _ = fs::write(&options_path, format!("{}\n", target_line));
+    }
+}
+
 pub fn push_log<F>(
     on_log: &F,
     log_buffer: &Arc<Mutex<Vec<GameLogEntry>>>,
@@ -628,6 +659,10 @@ where
         cmd_args.push("--fullscreen".to_string());
     }
 
+    // Sync `fullscreen:` inside `<instance_dir>/options.txt` so Minecraft respects
+    // the launcher setting even if the player previously quit while in fullscreen.
+    sync_minecraft_options_txt(&instance_dir, config.fullscreen);
+
     cmd_args.extend(extra_game_args);
 
     emit_prog(SyncProgressEvent {
@@ -741,5 +776,19 @@ mod tests {
         assert!(rules_allow_current_os(None));
         let rules = vec![json!({"action": "allow"})];
         assert!(rules_allow_current_os(Some(&rules)));
+    }
+
+    #[test]
+    fn test_sync_minecraft_options_txt() {
+        let tmp = std::env::temp_dir().join(format!("loxy-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&tmp).unwrap();
+        let opts = tmp.join("options.txt");
+        fs::write(&opts, "fov:0.0\nfullscreen:true\ngamma:1.0\n").unwrap();
+
+        sync_minecraft_options_txt(&tmp, false);
+        let updated = fs::read_to_string(&opts).unwrap();
+        assert!(updated.contains("fullscreen:false"));
+        assert!(!updated.contains("fullscreen:true"));
+        let _ = fs::remove_dir_all(&tmp);
     }
 }

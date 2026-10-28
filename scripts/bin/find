@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Wrapper for find used during Tauri AppImage bundling so linuxdeploy-plugin-gtk.sh
+# does not recursively scan unrelated third-party subdirectories under /usr/lib
+# (such as /usr/lib/vmware-installer or /usr/lib/vmware).
+if [ "$1" = "/usr/lib" ] || [ "$1" = "/usr/lib64" ]; then
+    dir="$1"
+    shift
+    exec /usr/bin/find "$dir" -maxdepth 1 "$@"
+fi
+exec /usr/bin/find "$@"
