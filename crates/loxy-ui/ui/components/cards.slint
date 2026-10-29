@@ -1,236 +1,318 @@
 import { McTheme, McButton } from "../theme.slint";
 import { ServerStatusData, AccountData } from "../models.slint";
 
-export component ServerCard inherits Rectangle {
-    in property <ServerStatusData> server;
-    callback ping-clicked();
-    
-    background: McTheme.card-bg;
-    border-color: McTheme.card-border;
-    border-width: 1px;
-    height: 54px;
-    
-    HorizontalLayout {
-        padding-left: 14px;
-        padding-right: 14px;
-        spacing: 12px;
-        alignment: space-between;
-        
-        HorizontalLayout {
-            spacing: 10px;
-            alignment: start;
-            
-            // Status dot
-            Rectangle {
-                width: 12px;
-                height: 12px;
-                border-radius: 6px;
-                background: root.server.online ? #4caf50 : #757575;
-                y: (parent.height - self.height) / 2;
-            }
-            
-            VerticalLayout {
-                alignment: center;
-                spacing: 2px;
-                
-                Text {
-                    text: root.server.online ? root.server.motd : "Server Offline / Unreachable";
-                    color: McTheme.text-primary;
-                    font-size: 13px;
-                    font-weight: 700;
-                    overflow: elide;
-                }
-                
-                Text {
-                    text: root.server.online ? (root.server.players-online + " / " + root.server.players-max + " Players (" + root.server.latency-ms + " ms)") : "Check internet connection or server host";
-                    color: McTheme.text-secondary;
-                    font-size: 11px;
-                }
-            }
-        }
-        
-        TouchArea {
-            width: 32px;
-            height: 32px;
-            clicked => { root.ping-clicked(); }
-            
-            Rectangle {
-                background: parent.has-hover ? #2e2e2e : #202020;
-                border-color: #383838;
-                border-width: 1px;
-                
-                Text {
-                    text: "↻";
-                    color: McTheme.text-primary;
-                    font-size: 16px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-            }
-        }
-    }
-}
-
 export component AccountPill inherits Rectangle {
     in property <AccountData> account;
     callback login-clicked();
     callback logout-clicked();
-    
-    background: McTheme.card-bg;
-    border-color: McTheme.card-border;
-    border-width: 1px;
-    height: 54px;
-    
-    HorizontalLayout {
-        padding-left: 12px;
-        padding-right: 12px;
-        spacing: 10px;
-        alignment: end;
-        
-        if root.account.logged-in : HorizontalLayout {
-            spacing: 10px;
-            alignment: center;
-            
-            Rectangle {
-                width: 32px;
-                height: 32px;
-                background: #2e7d32;
-                border-color: #4caf50;
-                border-width: 1px;
-                
-                Text {
-                    text: "MC";
-                    font-size: 11px;
-                    font-weight: 700;
-                    color: #ffffff;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-            }
-            
+    callback switch-clicked();
+
+    height: 38px;
+    width: root.account.logged-in ? 295px : 265px;
+    background: root.account.logged-in ? #141414 : transparent;
+    border-color: root.account.logged-in ? #333333 : transparent;
+    border-width: root.account.logged-in ? 1px : 0px;
+
+    if root.account.logged-in : HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 8px;
+        alignment: space-between;
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+
             VerticalLayout {
                 alignment: center;
-                spacing: 2px;
-                
+                Rectangle {
+                    width: 26px;
+                    height: 26px;
+                    background: #2e7d32;
+                    border-color: #000000;
+                    border-width: 1px;
+                    clip: true;
+
+                    if root.account.has-avatar : Image {
+                        width: 100%;
+                        height: 100%;
+                        source: root.account.avatar;
+                        image-rendering: pixelated;
+                        image-fit: cover;
+                    }
+
+                    if !root.account.has-avatar : Text {
+                        width: 100%;
+                        height: 100%;
+                        text: "MC";
+                        font-size: 9px;
+                        font-weight: 700;
+                        color: #ffffff;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            VerticalLayout {
+                alignment: center;
+                spacing: 1px;
+
                 Text {
                     text: root.account.username;
-                    font-size: 13px;
+                    font-size: 12px;
                     font-weight: 700;
-                    color: McTheme.text-primary;
+                    color: #a5d6a7;
+                    overflow: elide;
                 }
-                
+
                 Text {
                     text: "Microsoft Account";
                     font-size: 10px;
-                    color: #81c784;
+                    color: #888888;
                 }
-            }
-            
-            McButton {
-                text: "LOG OUT";
-                font-size: 10px;
-                h-padding: 8px;
-                v-padding: 4px;
-                danger: true;
-                clicked => { root.logout-clicked(); }
             }
         }
-        
-        if !root.account.logged-in : HorizontalLayout {
-            spacing: 10px;
+
+        VerticalLayout {
             alignment: center;
-            
-            VerticalLayout {
-                alignment: center;
-                Text {
-                    text: "Not Signed In";
-                    font-size: 12px;
-                    color: McTheme.text-muted;
+            HorizontalLayout {
+                spacing: 4px;
+                McButton {
+                    text: "SWITCH";
+                    font-size: 10px;
+                    h-padding: 7px;
+                    v-padding: 5px;
+                    clicked => { root.switch-clicked(); }
+                }
+                McButton {
+                    text: "LOGOUT";
+                    font-size: 10px;
+                    h-padding: 7px;
+                    v-padding: 5px;
+                    danger: true;
+                    clicked => { root.logout-clicked(); }
                 }
             }
-            
+        }
+    }
+
+    if !root.account.logged-in : HorizontalLayout {
+        spacing: 6px;
+        alignment: end;
+
+        VerticalLayout {
+            alignment: center;
             McButton {
-                text: "SIGN IN WITH MICROSOFT";
+                text: "SIGN IN";
                 font-size: 11px;
-                primary: true;
-                h-padding: 12px;
-                v-padding: 6px;
+                gold: true;
+                h-padding: 10px;
+                v-padding: 7px;
                 clicked => { root.login-clicked(); }
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            McButton {
+                text: "▼ ACCOUNTS";
+                font-size: 11px;
+                h-padding: 10px;
+                v-padding: 7px;
+                clicked => { root.switch-clicked(); }
             }
         }
     }
 }
 
-export component DashboardCard inherits Rectangle {
-    in property <string> category: "CATEGORY";
-    in property <string> title: "Title";
-    in property <string> subtitle: "Subtitle";
-    in property <string> badge: "";
-    in property <bool> is-clickable: false;
-    callback clicked();
-    
-    background: touch.has-hover && root.is-clickable ? McTheme.card-hover : McTheme.card-bg;
-    border-color: touch.has-hover && root.is-clickable ? #444444 : McTheme.card-border;
-    border-width: 1px;
-    height: 90px;
-    
-    touch := TouchArea {
-        enabled: root.is-clickable;
-        clicked => { root.clicked(); }
-    }
-    
+export component ServerStatusPanel inherits Rectangle {
+    in property <ServerStatusData> server;
+    in property <bool> is-refreshing: false;
+    callback ping-clicked();
+    callback copy-address-clicked();
+
+    background: McTheme.panel-bg;
+    border-color: McTheme.panel-border;
+    border-width: 2px;
+
     VerticalLayout {
-        padding: 12px;
-        spacing: 4px;
-        alignment: space-between;
-        
+        padding: 14px;
+        spacing: 10px;
+
+        // Top Row: Status Dot + Label + PING button
         HorizontalLayout {
             alignment: space-between;
-            
-            Text {
-                text: root.category;
-                font-size: 10px;
-                font-weight: 700;
-                color: McTheme.text-muted;
-                letter-spacing: 0.5px;
-            }
-            
-            if root.badge != "" : Rectangle {
-                background: #2e7d32;
-                border-color: #4caf50;
-                border-width: 1px;
-                height: 16px;
-                
-                Text {
-                    text: root.badge;
-                    font-size: 9px;
-                    font-weight: 700;
-                    color: #ffffff;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 12px;
+                        height: 12px;
+                        background: root.server.online ? #00e676 : #ff1744;
+                        border-color: #000000;
+                        border-width: 1px;
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    Text {
+                        text: root.server.online ? "SERVER ONLINE" : "SERVER OFFLINE";
+                        font-size: 12px;
+                        font-weight: 700;
+                        color: McTheme.text-primary;
+                    }
                 }
             }
-            
-            if root.is-clickable : Text {
-                text: "⚙ EDIT";
-                font-size: 10px;
-                font-weight: 700;
-                color: #81c784;
+
+            VerticalLayout {
+                alignment: center;
+                McButton {
+                    text: root.is-refreshing ? "..." : "PING";
+                    disabled: root.is-refreshing;
+                    font-size: 11px;
+                    h-padding: 10px;
+                    v-padding: 4px;
+                    clicked => { root.ping-clicked(); }
+                }
             }
         }
-        
-        Text {
-            text: root.title;
-            font-size: 16px;
-            font-weight: 700;
-            color: McTheme.text-primary;
-            overflow: elide;
+
+        // Inset Server Multiplayer Entry Box
+        Rectangle {
+            background: McTheme.inset-bg;
+            border-color: McTheme.inset-border;
+            border-width: 1px;
+
+            VerticalLayout {
+                padding: 12px;
+                spacing: 8px;
+
+                HorizontalLayout {
+                    alignment: space-between;
+                    Text {
+                        text: root.server.host + ":" + root.server.port;
+                        font-size: 12px;
+                        font-weight: 700;
+                        color: #ffffff;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: root.server.has-latency ? (root.server.latency-ms + " ms") : "---";
+                        font-size: 11px;
+                        font-weight: 700;
+                        color: #81c784;
+                    }
+                }
+
+                Text {
+                    text: root.server.motd;
+                    font-size: 12px;
+                    color: #bdbdbd;
+                    wrap: word-wrap;
+                }
+
+                // Players Online Bar
+                VerticalLayout {
+                    spacing: 4px;
+
+                    HorizontalLayout {
+                        alignment: space-between;
+                        Text {
+                            text: "PLAYERS ONLINE";
+                            font-size: 10px;
+                            color: #aaaaaa;
+                        }
+                        Text {
+                            text: root.server.players-online + " / " + root.server.players-max;
+                            font-size: 11px;
+                            font-weight: 700;
+                            color: #ffffff;
+                        }
+                    }
+
+                    Rectangle {
+                        height: 10px;
+                        background: #1b1b1b;
+                        border-color: #333333;
+                        border-width: 1px;
+
+                        Rectangle {
+                            x: 1px;
+                            y: 1px;
+                            height: parent.height - 2px;
+                            width: root.server.players-max > 0 ?
+                                   Math.min(1.0, Math.max(0.0, root.server.players-online / root.server.players-max)) * (parent.width - 2px) :
+                                   0px;
+                            background: #4caf50;
+                        }
+                    }
+                }
+            }
         }
-        
-        Text {
-            text: root.subtitle;
+
+        McButton {
+            text: "COPY SERVER ADDRESS";
             font-size: 11px;
-            color: McTheme.text-secondary;
+            v-padding: 6px;
+            clicked => { root.copy-address-clicked(); }
+        }
+    }
+}
+
+export component ProfileTile inherits Rectangle {
+    in property <string> label: "LABEL";
+    in property <string> action-hint: "";
+    in property <string> value: "Value";
+    in property <color> value-color: #ffffff;
+    in property <color> hover-border-color: #66bb6a;
+
+    callback clicked();
+
+    height: 58px;
+    horizontal-stretch: 1;
+    background: touch.has-hover ? #191919 : McTheme.inset-bg;
+    border-color: touch.has-hover ? root.hover-border-color : McTheme.inset-border;
+    border-width: 1px;
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    VerticalLayout {
+        padding: 10px;
+        alignment: space-between;
+        min-width: 0px;
+
+        HorizontalLayout {
+            alignment: space-between;
+            min-width: 0px;
+            Text {
+                text: root.label;
+                font-size: 10px;
+                font-weight: 700;
+                color: touch.has-hover ? root.value-color : #999999;
+                overflow: elide;
+            }
+            if root.action-hint != "" : Text {
+                text: root.action-hint;
+                font-size: 10px;
+                font-weight: 700;
+                color: root.value-color;
+            }
+        }
+
+        Text {
+            text: root.value;
+            font-size: 13px;
+            font-weight: 700;
+            color: root.value-color;
             overflow: elide;
         }
     }

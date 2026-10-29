@@ -64,6 +64,8 @@ pub struct LauncherConfig {
     pub server_port: u16,
     pub azure_client_id: String,
     pub account: Option<MinecraftAccount>,
+    #[serde(default)]
+    pub accounts: Vec<MinecraftAccount>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +123,33 @@ impl LauncherConfig {
             .with_context(|| format!("Failed to write config file {:?}", path))?;
         Ok(())
     }
+
+    pub fn add_or_update_account(&mut self, acc: MinecraftAccount) {
+        if let Some(existing) = self.accounts.iter_mut().find(|a| a.uuid == acc.uuid) {
+            *existing = acc.clone();
+        } else {
+            self.accounts.push(acc.clone());
+        }
+        self.account = Some(acc);
+    }
+
+    pub fn switch_account(&mut self, uuid: &str) -> bool {
+        if let Some(target) = self.accounts.iter().find(|a| a.uuid == uuid).cloned() {
+            self.account = Some(target);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn remove_account(&mut self, uuid: &str) {
+        self.accounts.retain(|a| a.uuid != uuid);
+        if let Some(active) = &self.account {
+            if active.uuid == uuid {
+                self.account = self.accounts.first().cloned();
+            }
+        }
+    }
 }
 
 impl Default for LauncherConfig {
@@ -145,6 +174,7 @@ impl Default for LauncherConfig {
             server_port: 25565,
             azure_client_id: DEFAULT_AZURE_CLIENT_ID.to_string(),
             account: None,
+            accounts: Vec::new(),
         }
     }
 }

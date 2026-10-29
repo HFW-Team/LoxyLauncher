@@ -9,20 +9,99 @@ use loxy_core::{
     java,
     launcher::{push_log, GameLogEntry, WindowAction},
     modpack::{
-        fetch_or_fallback_manifest, install_modrinth_mod, list_installed_mods,
-        search_modrinth_mods, synchronize_modpack, toggle_or_delete_installed_mod,
+        extract_icon_from_archive, fetch_or_fallback_manifest, get_installed_modrinth_projects,
+        get_modrinth_mod_versions, install_modrinth_mod, list_installed_mods, search_modrinth_mods,
+        synchronize_modpack, toggle_or_delete_installed_mod,
     },
     ping::ping_minecraft_server,
 };
 use reqwest::Client;
-use slint::{ComponentHandle, Model, ModelRc, VecModel};
+use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc, Mutex,
+};
 use std::time::Duration;
+
+type IconBuffer = SharedPixelBuffer<Rgba8Pixel>;
+type IconCache = Arc<Mutex<HashMap<String, IconBuffer>>>;
+
+fn decode_image_to_buffer(bytes: &[u8], target_size: u32) -> Option<IconBuffer> {
+    let img = image::load_from_memory(bytes).ok()?;
+    let resized = if img.width() != target_size || img.height() != target_size {
+        img.resize_exact(target_size, target_size, image::imageops::FilterType::Triangle)
+    } else {
+        img
+    };
+    let rgba = resized.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    Some(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+        rgba.as_raw(),
+        w,
+        h,
+    ))
+}
+
+fn extract_head_from_skin(bytes: &[u8], target_size: u32) -> Option<IconBuffer> {
+    let img = image::load_from_memory(bytes).ok()?.to_rgba8();
+    if img.width() < 16 || img.height() < 16 {
+        return None;
+    }
+
+    let mut head = image::RgbaImage::new(8, 8);
+    // Base face at (8, 8, 8, 8)
+    for y in 0..8 {
+        for x in 0..8 {
+            head.put_pixel(x, y, *img.get_pixel(8 + x, 8 + y));
+        }
+    }
+
+    // Outer hat layer at (40, 8, 8, 8) if skin dimensions permit
+    if img.width() >= 48 && img.height() >= 16 {
+        for y in 0..8 {
+            for x in 0..8 {
+                let hat_p = img.get_pixel(40 + x, 8 + y);
+                let alpha = hat_p[3] as u32;
+                if alpha > 0 {
+                    if alpha == 255 {
+                        head.put_pixel(x, y, *hat_p);
+                    } else {
+                        let base_p = head.get_pixel_mut(x, y);
+                        let inv_alpha = 255 - alpha;
+                        for c in 0..3 {
+                            base_p[c] = ((hat_p[c] as u32 * alpha + base_p[c] as u32 * inv_alpha) / 255) as u8;
+                        }
+                        base_p[3] = 255;
+                    }
+                }
+            }
+        }
+    }
+
+    let upscaled = image::imageops::resize(&head, target_size, target_size, image::imageops::FilterType::Nearest);
+    let (w, h) = upscaled.dimensions();
+    Some(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+        upscaled.as_raw(),
+        w,
+        h,
+    ))
+}
+
+fn format_downloads(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 1. Force Pure Software Rendering to guarantee ~15-25MB RAM and 0 GPU/LLVM overhead
+    // 1. Force Pure Software Rendering to guarantee ~20-35MB RAM and 0 GPU/LLVM overhead
     std::env::set_var("SLINT_BACKEND", "winit-software");
 
     let main_window = MainWindow::new()?;
@@ -31,6 +110,10 @@ async fn main() -> Result<()> {
     // 2. Setup Shared Backend State
     let config = Arc::new(Mutex::new(LauncherConfig::load().unwrap_or_default()));
     let logs = Arc::new(Mutex::new(Vec::<GameLogEntry>::new()));
+    let icon_cache: IconCache = Arc::new(Mutex::new(HashMap::new()));
+    let search_seq = Arc::new(AtomicU64::new(0));
+    let mod_filters_initialized = Arc::new(AtomicBool::new(false));
+
     let http_client = Client::builder()
         .user_agent("LoxyLauncher-Native/0.1.0 (https://github.com/HFW-Team/LoxyLauncher)")
         .pool_max_idle_per_host(32)
@@ -39,8 +122,22 @@ async fn main() -> Result<()> {
         .build()?;
     let discord = Arc::new(DiscordRpcManager::new());
 
-    // 3. Initialize UI with Current Configuration & System Stats
+    // 3. Initialize UI with Current Configuration, Detected JDKs & System Stats
     let sys_mem = LauncherConfig::system_memory_info();
+    let sys_javas = java::detect_system_javas();
+    {
+        let jdks: Vec<DetectedJavaData> = sys_javas
+            .into_iter()
+            .map(|j| DetectedJavaData {
+                path: j.path.into(),
+                major: j.major_version as i32,
+                version_string: j.label.clone().into(),
+                label: j.label.into(),
+            })
+            .collect();
+        main_window.set_detected_javas(ModelRc::new(VecModel::from(jdks)));
+    }
+
     {
         let cfg = config.lock().unwrap();
         discord.update_status(cfg.discord_rpc_enabled, "In Launcher Menu", "Ready to launch");
@@ -50,10 +147,12 @@ async fn main() -> Result<()> {
             shared_dir: cfg.shared_dir.clone().into(),
             min_ram_mb: cfg.min_ram_mb as i32,
             max_ram_mb: cfg.max_ram_mb as i32,
+            recommended_ram_mb: sys_mem.recommended_max_mb as i32,
+            total_system_ram_mb: sys_mem.total_ram_mb as i32,
             jvm_args: cfg.jvm_args.clone().into(),
             java_path: cfg.java_path.clone().unwrap_or_default().into(),
-            resolution_width: cfg.resolution_width as i32,
-            resolution_height: cfg.resolution_height as i32,
+            resolution_width: cfg.resolution_width.to_string().into(),
+            resolution_height: cfg.resolution_height.to_string().into(),
             fullscreen: cfg.fullscreen,
             close_behavior: match cfg.close_behavior {
                 CloseBehavior::HideAndReopen => 0,
@@ -62,18 +161,14 @@ async fn main() -> Result<()> {
             },
             discord_rpc: cfg.discord_rpc_enabled,
             keep_user_mods: cfg.keep_user_mods,
+            manifest_url: cfg.manifest_url.clone().into(),
+            server_host: cfg.server_host.clone().into(),
+            server_port: cfg.server_port.to_string().into(),
             azure_client_id: cfg.azure_client_id.clone().into(),
-            total_system_ram_mb: sys_mem.total_ram_mb as i32,
         };
         main_window.set_config(ui_cfg);
 
-        if let Some(acc) = &cfg.account {
-            main_window.set_account(AccountData {
-                logged_in: true,
-                username: acc.username.clone().into(),
-                uuid: acc.uuid.clone().into(),
-            });
-        }
+        update_ui_accounts(&main_window, &cfg, &http_client, ui_handle.clone());
     }
 
     // 4. Background Startup Task: Initial Ping, Manifest Check & Installed Mods List
@@ -81,34 +176,144 @@ async fn main() -> Result<()> {
         let ui_w = ui_handle.clone();
         let cfg_arc = config.clone();
         let client = http_client.clone();
+        let cache = icon_cache.clone();
+        let init_flag = mod_filters_initialized.clone();
         tokio::spawn(async move {
-            refresh_dashboard_and_ping(ui_w, cfg_arc, client).await;
+            refresh_dashboard_and_ping(ui_w, cfg_arc, client, cache, init_flag).await;
         });
     }
 
     // 5. Connect Slint Callbacks
-    // --- Ping / Refresh ---
+    // --- Full Refresh (Manifest + Server Ping) ---
     {
         let ui_w = ui_handle.clone();
         let cfg_arc = config.clone();
         let client = http_client.clone();
-        main_window.on_ping_clicked(move || {
+        let cache = icon_cache.clone();
+        let init_flag = mod_filters_initialized.clone();
+        main_window.on_refresh_clicked(move || {
             let ui_w = ui_w.clone();
             let cfg_arc = cfg_arc.clone();
             let client = client.clone();
+            let cache = cache.clone();
+            let init_flag = init_flag.clone();
             tokio::spawn(async move {
-                refresh_dashboard_and_ping(ui_w, cfg_arc, client).await;
+                refresh_dashboard_and_ping(ui_w, cfg_arc, client, cache, init_flag).await;
             });
+        });
+    }
+
+    // --- Ping Server Only ---
+    {
+        let ui_w = ui_handle.clone();
+        main_window.on_ping_only_clicked(move || {
+            let ui_w = ui_w.clone();
+            if let Some(ui) = ui_w.upgrade() {
+                let mp = ui.get_modpack();
+                let host = mp.server_host.to_string();
+                let port = mp.server_port as u16;
+                ui.set_is_refreshing(true);
+                tokio::spawn(async move {
+                    let s_status = ping_minecraft_server(&host, port).await;
+                    let _ = ui_w.upgrade_in_event_loop(move |ui| {
+                        ui.set_server_status(ServerStatusData {
+                            online: s_status.online,
+                            host: s_status.host.into(),
+                            port: s_status.port as i32,
+                            motd: s_status.motd.into(),
+                            players_online: s_status.players_online as i32,
+                            players_max: s_status.players_max as i32,
+                            latency_ms: s_status.latency_ms.unwrap_or(0) as i32,
+                            has_latency: s_status.latency_ms.is_some(),
+                        });
+                        ui.set_is_refreshing(false);
+                    });
+                });
+            }
+        });
+    }
+
+    // --- Copy Server Address ---
+    {
+        let ui_w = ui_handle.clone();
+        main_window.on_copy_server_address_clicked(move || {
+            if let Some(ui) = ui_w.upgrade() {
+                let mp = ui.get_modpack();
+                let addr = if mp.server_port == 25565 {
+                    mp.server_host.to_string()
+                } else {
+                    format!("{}:{}", mp.server_host, mp.server_port)
+                };
+                if let Ok(mut clip) = arboard::Clipboard::new() {
+                    let _ = clip.set_text(addr.clone());
+                }
+                ui.set_status_banner_type("info".into());
+                ui.set_status_banner_text(format!("Copied server address: {}", addr).into());
+            }
+        });
+    }
+
+    // --- Open Instance Folder ---
+    {
+        let cfg_arc = config.clone();
+        main_window.on_open_instance_folder_clicked(move || {
+            let dir = {
+                let cfg = cfg_arc.lock().unwrap();
+                PathBuf::from(&cfg.instance_dir)
+            };
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = open::that(&dir);
+        });
+    }
+
+    // --- Open Mods Modal (Auto-loads Installed Mods + Initial Modrinth Search) ---
+    {
+        let ui_w = ui_handle.clone();
+        let cfg_arc = config.clone();
+        let client = http_client.clone();
+        let cache = icon_cache.clone();
+        let seq = search_seq.clone();
+        main_window.on_open_mods_modal_clicked(move || {
+            if let Some(ui) = ui_w.upgrade() {
+                ui.set_mod_notice_text("".into());
+                ui.set_mods_open(true);
+
+                let instance_dir = {
+                    let cfg = cfg_arc.lock().unwrap();
+                    PathBuf::from(&cfg.instance_dir)
+                };
+                let filter_str = ui.get_mod_installed_filter().to_string();
+                let cat_filter = ui.get_mod_installed_category().to_string();
+                refresh_installed_mods(ui_w.clone(), &instance_dir, &filter_str, &cat_filter, cache.clone());
+
+                if ui.get_mod_search_results().row_count() == 0 {
+                    trigger_modrinth_search(
+                        ui_w.clone(),
+                        client.clone(),
+                        cache.clone(),
+                        seq.clone(),
+                        0,
+                    );
+                }
+            }
         });
     }
 
     // --- Save RAM ---
     {
         let cfg_arc = config.clone();
+        let ui_w = ui_handle.clone();
         main_window.on_save_ram_clicked(move |max_ram| {
             if let Ok(mut cfg) = cfg_arc.lock() {
-                cfg.max_ram_mb = max_ram as u32;
+                cfg.max_ram_mb = (max_ram as u32).max(2048);
+                if cfg.min_ram_mb > cfg.max_ram_mb {
+                    cfg.min_ram_mb = cfg.max_ram_mb;
+                }
                 let _ = cfg.save();
+            }
+            if let Some(ui) = ui_w.upgrade() {
+                ui.set_status_banner_type("info".into());
+                ui.set_status_banner_text(format!("Allocated RAM set to {} MB.", max_ram).into());
             }
         });
     }
@@ -117,6 +322,9 @@ async fn main() -> Result<()> {
     {
         let cfg_arc = config.clone();
         let ui_w = ui_handle.clone();
+        let client = http_client.clone();
+        let cache = icon_cache.clone();
+        let init_flag = mod_filters_initialized.clone();
         main_window.on_save_settings_clicked(move || {
             if let Some(ui) = ui_w.upgrade() {
                 let ui_cfg = ui.get_config();
@@ -124,13 +332,25 @@ async fn main() -> Result<()> {
                     cfg.instance_dir = ui_cfg.instance_dir.to_string();
                     cfg.shared_dir = ui_cfg.shared_dir.to_string();
                     cfg.min_ram_mb = ui_cfg.min_ram_mb as u32;
-                    cfg.max_ram_mb = ui_cfg.max_ram_mb as u32;
+                    cfg.max_ram_mb = (ui_cfg.max_ram_mb as u32).max(2048);
+                    if cfg.min_ram_mb > cfg.max_ram_mb {
+                        cfg.min_ram_mb = cfg.max_ram_mb;
+                    }
                     cfg.jvm_args = ui_cfg.jvm_args.to_string();
-                    cfg.java_path = if ui_cfg.java_path.is_empty() {
-                        None
-                    } else {
-                        Some(ui_cfg.java_path.to_string())
-                    };
+                    let jp = ui_cfg.java_path.trim().to_string();
+                    cfg.java_path = if jp.is_empty() { None } else { Some(jp) };
+                    cfg.resolution_width = ui_cfg
+                        .resolution_width
+                        .trim()
+                        .parse::<u32>()
+                        .unwrap_or(1280)
+                        .max(640);
+                    cfg.resolution_height = ui_cfg
+                        .resolution_height
+                        .trim()
+                        .parse::<u32>()
+                        .unwrap_or(720)
+                        .max(480);
                     cfg.fullscreen = ui_cfg.fullscreen;
                     cfg.close_behavior = match ui_cfg.close_behavior {
                         1 => CloseBehavior::KeepOpen,
@@ -139,6 +359,43 @@ async fn main() -> Result<()> {
                     };
                     cfg.discord_rpc_enabled = ui_cfg.discord_rpc;
                     cfg.keep_user_mods = ui_cfg.keep_user_mods;
+                    cfg.manifest_url = ui_cfg.manifest_url.trim().to_string();
+                    cfg.server_host = ui_cfg.server_host.trim().to_string();
+                    cfg.server_port = ui_cfg
+                        .server_port
+                        .trim()
+                        .parse::<u16>()
+                        .unwrap_or(25565);
+                    cfg.azure_client_id = ui_cfg.azure_client_id.trim().to_string();
+                    let _ = cfg.save();
+                }
+                ui.set_status_banner_type("info".into());
+                ui.set_status_banner_text("Settings saved.".into());
+
+                let ui_w2 = ui_w.clone();
+                let cfg_arc2 = cfg_arc.clone();
+                let client2 = client.clone();
+                let cache2 = cache.clone();
+                let init_flag2 = init_flag.clone();
+                tokio::spawn(async move {
+                    refresh_dashboard_and_ping(ui_w2, cfg_arc2, client2, cache2, init_flag2).await;
+                });
+            }
+        });
+    }
+
+    // --- Toggle Keep User Mods in Mods Dialog ---
+    {
+        let cfg_arc = config.clone();
+        let ui_w = ui_handle.clone();
+        main_window.on_toggle_keep_user_mods_clicked(move || {
+            if let Some(ui) = ui_w.upgrade() {
+                let mut c = ui.get_config();
+                c.keep_user_mods = !c.keep_user_mods;
+                let new_val = c.keep_user_mods;
+                ui.set_config(c);
+                if let Ok(mut cfg) = cfg_arc.lock() {
+                    cfg.keep_user_mods = new_val;
                     let _ = cfg.save();
                 }
             }
@@ -153,18 +410,6 @@ async fn main() -> Result<()> {
                 if let Some(ui) = ui_w.upgrade() {
                     let mut c = ui.get_config();
                     c.instance_dir = folder.to_string_lossy().to_string().into();
-                    ui.set_config(c);
-                }
-            }
-        });
-    }
-    {
-        let ui_w = ui_handle.clone();
-        main_window.on_browse_shared_clicked(move || {
-            if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                if let Some(ui) = ui_w.upgrade() {
-                    let mut c = ui.get_config();
-                    c.shared_dir = folder.to_string_lossy().to_string().into();
                     ui.set_config(c);
                 }
             }
@@ -199,7 +444,9 @@ async fn main() -> Result<()> {
                 };
 
                 let _ = ui_w.upgrade_in_event_loop(|ui| {
-                    ui.set_auth_status("Initiating Microsoft login...".into());
+                    ui.set_auth_user_code("".into());
+                    ui.set_auth_status("Requesting verification code from Microsoft...".into());
+                    ui.set_auth_code_copied(false);
                     ui.set_auth_open(true);
                 });
 
@@ -209,26 +456,38 @@ async fn main() -> Result<()> {
                         let _ = ui_w.upgrade_in_event_loop(move |ui| {
                             ui.set_auth_user_code(dev_clone.user_code.into());
                             ui.set_auth_verification_uri(dev_clone.verification_uri.into());
-                            ui.set_auth_status("Waiting for browser login approval...".into());
+                            ui.set_auth_status(
+                                "Waiting for you to complete login in browser...".into(),
+                            );
                             ui.set_auth_code_copied(false);
                         });
 
-                        // Poll device code flow
-                        match auth::poll_for_microsoft_token(&client, &client_id, &dev_code.device_code, dev_code.interval, dev_code.expires_in).await {
+                        match auth::poll_for_microsoft_token(
+                            &client,
+                            &client_id,
+                            &dev_code.device_code,
+                            dev_code.interval,
+                            dev_code.expires_in,
+                        )
+                        .await
+                        {
                             Ok(account) => {
-                                {
+                                let cfg_clone = {
                                     let mut cfg = cfg_arc.lock().unwrap();
-                                    cfg.account = Some(account.clone());
+                                    cfg.add_or_update_account(account.clone());
                                     let _ = cfg.save();
-                                }
+                                    cfg.clone()
+                                };
+                                let uname = account.username.clone();
+                                let ui_w_update = ui_w.clone();
+                                let client_update = client.clone();
                                 let _ = ui_w.upgrade_in_event_loop(move |ui| {
-                                    ui.set_account(AccountData {
-                                        logged_in: true,
-                                        username: account.username.into(),
-                                        uuid: account.uuid.into(),
-                                    });
+                                    update_ui_accounts(&ui, &cfg_clone, &client_update, ui_w_update);
                                     ui.set_auth_open(false);
-                                    ui.set_status_banner_text("Signed in successfully!".into());
+                                    ui.set_status_banner_type("info".into());
+                                    ui.set_status_banner_text(
+                                        format!("Signed in as {}", uname).into(),
+                                    );
                                 });
                             }
                             Err(e) => {
@@ -253,19 +512,59 @@ async fn main() -> Result<()> {
     {
         let cfg_arc = config.clone();
         let ui_w = ui_handle.clone();
+        let client = http_client.clone();
         main_window.on_logout_clicked(move || {
-            {
+            let cfg_clone = {
                 let mut cfg = cfg_arc.lock().unwrap();
                 cfg.account = None;
                 let _ = cfg.save();
-            }
+                cfg.clone()
+            };
             if let Some(ui) = ui_w.upgrade() {
-                ui.set_account(AccountData {
-                    logged_in: false,
-                    username: "".into(),
-                    uuid: "".into(),
-                });
-                ui.set_status_banner_text("Signed out.".into());
+                update_ui_accounts(&ui, &cfg_clone, &client, ui_w.clone());
+                ui.set_status_banner_type("info".into());
+                ui.set_status_banner_text("Signed out of Microsoft account.".into());
+            }
+        });
+    }
+
+    // --- Fast Account Switcher Callbacks ---
+    {
+        let cfg_arc = config.clone();
+        let ui_w = ui_handle.clone();
+        let client = http_client.clone();
+        main_window.on_select_account_clicked(move |uuid| {
+            let u_str = uuid.to_string();
+            let mut cfg = cfg_arc.lock().unwrap();
+            if cfg.switch_account(&u_str) {
+                let _ = cfg.save();
+                let cfg_clone = cfg.clone();
+                if let Some(ui) = ui_w.upgrade() {
+                    ui.set_accounts_open(false);
+                    update_ui_accounts(&ui, &cfg_clone, &client, ui_w.clone());
+                    if let Some(acc) = &cfg_clone.account {
+                        ui.set_status_banner_type("info".into());
+                        ui.set_status_banner_text(
+                            format!("Switched to account {}", acc.username).into(),
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    {
+        let cfg_arc = config.clone();
+        let ui_w = ui_handle.clone();
+        let client = http_client.clone();
+        main_window.on_remove_account_clicked(move |uuid| {
+            let u_str = uuid.to_string();
+            let mut cfg = cfg_arc.lock().unwrap();
+            cfg.remove_account(&u_str);
+            let _ = cfg.save();
+            let cfg_clone = cfg.clone();
+            if let Some(ui) = ui_w.upgrade() {
+                update_ui_accounts(&ui, &cfg_clone, &client, ui_w.clone());
             }
         });
     }
@@ -294,6 +593,15 @@ async fn main() -> Result<()> {
     }
 
     // --- Console Callbacks ---
+    {
+        let logs_arc = logs.clone();
+        let ui_w = ui_handle.clone();
+        main_window.on_console_filter_selected(move |lvl| {
+            let lvl_str = lvl.to_string();
+            refresh_console_logs_view(&ui_w, &logs_arc, &lvl_str);
+        });
+    }
+
     {
         let logs_arc = logs.clone();
         let ui_w = ui_handle.clone();
@@ -330,88 +638,263 @@ async fn main() -> Result<()> {
         });
     }
 
-    // --- Mod Manager Callbacks ---
+    // --- Modrinth Real-Time Search & Filter Callbacks ---
     {
         let ui_w = ui_handle.clone();
         let client = http_client.clone();
-        main_window.on_mod_search_triggered(move |q| {
-            let q_str = q.to_string();
-            let ui_w = ui_w.clone();
-            let client = client.clone();
-            tokio::spawn(async move {
-                let _ = ui_w.upgrade_in_event_loop(|ui| {
-                    ui.set_mod_is_searching(true);
-                });
-
-                let hits = search_modrinth_mods(&client, &q_str, None, None, None)
-                    .await
-                    .unwrap_or_default();
-
-                let _ = ui_w.upgrade_in_event_loop(move |ui| {
-                    let items: Vec<ModHitData> = hits
-                        .into_iter()
-                        .map(|h| ModHitData {
-                            project_id: h.project_id.into(),
-                            slug: h.slug.into(),
-                            title: h.title.into(),
-                            description: h.description.into(),
-                            author: h.author.into(),
-                            downloads: h.downloads as i32,
-                            installed: false,
-                        })
-                        .collect();
-                    ui.set_mod_search_results(ModelRc::new(VecModel::from(items)));
-                    ui.set_mod_is_searching(false);
-                });
-            });
+        let cache = icon_cache.clone();
+        let seq = search_seq.clone();
+        main_window.on_mod_search_edited(move |_q| {
+            trigger_modrinth_search(
+                ui_w.clone(),
+                client.clone(),
+                cache.clone(),
+                seq.clone(),
+                220,
+            );
         });
     }
 
     {
         let ui_w = ui_handle.clone();
         let client = http_client.clone();
-        let cfg_arc = config.clone();
-        main_window.on_mod_install_clicked(move |project_id| {
+        let cache = icon_cache.clone();
+        let seq = search_seq.clone();
+        main_window.on_mod_search_triggered(move |_q| {
+            trigger_modrinth_search(ui_w.clone(), client.clone(), cache.clone(), seq.clone(), 0);
+        });
+    }
+
+    {
+        let ui_w = ui_handle.clone();
+        let client = http_client.clone();
+        let cache = icon_cache.clone();
+        let seq = search_seq.clone();
+        main_window.on_mod_mc_version_edited(move |_v| {
+            if let Some(ui) = ui_w.upgrade() {
+                ui.set_mod_expanded_project_id("".into());
+            }
+            trigger_modrinth_search(
+                ui_w.clone(),
+                client.clone(),
+                cache.clone(),
+                seq.clone(),
+                250,
+            );
+        });
+    }
+
+    {
+        let ui_w = ui_handle.clone();
+        let client = http_client.clone();
+        let cache = icon_cache.clone();
+        let seq = search_seq.clone();
+        main_window.on_mod_toggle_mc_version_all(move || {
+            if let Some(ui) = ui_w.upgrade() {
+                let cur = ui.get_mod_filter_mc_version().to_string();
+                let next = if cur.eq_ignore_ascii_case("all") {
+                    ui.get_modpack().mc_version.to_string()
+                } else {
+                    "all".to_string()
+                };
+                ui.set_mod_filter_mc_version(next.into());
+                ui.set_mod_expanded_project_id("".into());
+            }
+            trigger_modrinth_search(ui_w.clone(), client.clone(), cache.clone(), seq.clone(), 0);
+        });
+    }
+
+    {
+        let ui_w = ui_handle.clone();
+        let client = http_client.clone();
+        let cache = icon_cache.clone();
+        let seq = search_seq.clone();
+        main_window.on_mod_loader_selected(move |loader| {
+            if let Some(ui) = ui_w.upgrade() {
+                ui.set_mod_filter_loader(loader);
+                ui.set_mod_expanded_project_id("".into());
+            }
+            trigger_modrinth_search(ui_w.clone(), client.clone(), cache.clone(), seq.clone(), 0);
+        });
+    }
+
+    {
+        let ui_w = ui_handle.clone();
+        let client = http_client.clone();
+        let cache = icon_cache.clone();
+        let seq = search_seq.clone();
+        main_window.on_mod_project_type_selected(move |pt| {
+            if let Some(ui) = ui_w.upgrade() {
+                ui.set_mod_filter_project_type(pt);
+                ui.set_mod_expanded_project_id("".into());
+            }
+            trigger_modrinth_search(ui_w.clone(), client.clone(), cache.clone(), seq.clone(), 0);
+        });
+    }
+
+    {
+        let ui_w = ui_handle.clone();
+        let client = http_client.clone();
+        let cache = icon_cache.clone();
+        let seq = search_seq.clone();
+        main_window.on_mod_sort_selected(move |sort| {
+            if let Some(ui) = ui_w.upgrade() {
+                ui.set_mod_filter_sort(sort);
+            }
+            trigger_modrinth_search(ui_w.clone(), client.clone(), cache.clone(), seq.clone(), 0);
+        });
+    }
+
+    // --- Mod Version Picker Dropdown Toggle ---
+    {
+        let ui_w = ui_handle.clone();
+        let client = http_client.clone();
+        main_window.on_mod_toggle_versions_clicked(move |project_id| {
             let pid = project_id.to_string();
             let ui_w = ui_w.clone();
             let client = client.clone();
-            let cfg_arc = cfg_arc.clone();
-            tokio::spawn(async move {
-                let (instance_dir, mc_ver, loader) = {
-                    let cfg = cfg_arc.lock().unwrap();
-                    let inst = PathBuf::from(&cfg.instance_dir);
-                    let cached_path = inst.join("cached-manifest.json");
-                    let (mc, ld) = if let Ok(raw) = std::fs::read_to_string(&cached_path) {
-                        if let Ok(m) = serde_json::from_str::<serde_json::Value>(&raw) {
-                            (
-                                m.get("minecraft_version").and_then(|v| v.as_str()).unwrap_or("1.21.1").to_string(),
-                                m.get("loader").and_then(|v| v.as_str()).unwrap_or("fabric").to_string(),
-                            )
-                        } else {
-                            ("1.21.1".to_string(), "fabric".to_string())
+
+            let (should_fetch, mc_ver, loader) = if let Some(ui) = ui_w.upgrade() {
+                if ui.get_mod_expanded_project_id().as_str() == pid {
+                    ui.set_mod_expanded_project_id("".into());
+                    (false, String::new(), String::new())
+                } else {
+                    ui.set_mod_expanded_project_id(pid.clone().into());
+                    ui.set_mod_loading_versions(true);
+                    ui.set_mod_expanded_versions(ModelRc::new(VecModel::default()));
+                    (
+                        true,
+                        ui.get_mod_filter_mc_version().to_string(),
+                        ui.get_mod_filter_loader().to_string(),
+                    )
+                }
+            } else {
+                (false, String::new(), String::new())
+            };
+
+            if should_fetch {
+                tokio::spawn(async move {
+                    let vers = get_modrinth_mod_versions(
+                        &client,
+                        &pid,
+                        Some(mc_ver.as_str()),
+                        Some(loader.as_str()),
+                    )
+                    .await
+                    .unwrap_or_default();
+
+                    let pid_clone = pid.clone();
+                    let _ = ui_w.upgrade_in_event_loop(move |ui| {
+                        if ui.get_mod_expanded_project_id().as_str() == pid_clone {
+                            let items: Vec<ModVersionData> = vers
+                                .into_iter()
+                                .map(|v| ModVersionData {
+                                    id: v.id.into(),
+                                    project_id: pid_clone.clone().into(),
+                                    name: v.name.into(),
+                                    version_number: v.version_number.into(),
+                                    game_versions: v.game_versions.join(", ").into(),
+                                    loaders: v.loaders.join(", ").into(),
+                                    date_published: v.date_published.into(),
+                                    installing: false,
+                                })
+                                .collect();
+                            ui.set_mod_expanded_versions(ModelRc::new(VecModel::from(items)));
+                            ui.set_mod_loading_versions(false);
                         }
-                    } else {
-                        ("1.21.1".to_string(), "fabric".to_string())
-                    };
-                    (inst, mc, ld)
+                    });
+                });
+            }
+        });
+    }
+
+    // --- Install Mod (Latest or Specific Version) ---
+    {
+        let ui_w = ui_handle.clone();
+        let client = http_client.clone();
+        let cfg_arc = config.clone();
+        let cache = icon_cache.clone();
+        let seq = search_seq.clone();
+        main_window.on_mod_install_clicked(move |project_id, version_id| {
+            let pid = project_id.to_string();
+            let vid = version_id.to_string();
+            let ui_w = ui_w.clone();
+            let client = client.clone();
+            let cfg_arc = cfg_arc.clone();
+            let cache = cache.clone();
+            let seq = seq.clone();
+
+            let (mc_ver, loader, project_type) = if let Some(ui) = ui_w.upgrade() {
+                set_mod_installing_state(&ui, &pid, &vid, true);
+                let mut mc = ui.get_mod_filter_mc_version().trim().to_string();
+                if mc.is_empty() || mc.eq_ignore_ascii_case("all") {
+                    mc = ui.get_modpack().mc_version.to_string();
+                }
+                let mut ld = ui.get_mod_filter_loader().trim().to_lowercase();
+                if ld.is_empty() || ld == "all" {
+                    ld = ui.get_modpack().loader.to_lowercase();
+                }
+                let pt = ui.get_mod_filter_project_type().to_string();
+                (mc, ld, pt)
+            } else {
+                ("1.21.1".to_string(), "fabric".to_string(), "mod".to_string())
+            };
+
+            tokio::spawn(async move {
+                let instance_dir = {
+                    let mut cfg = cfg_arc.lock().unwrap();
+                    if !cfg.keep_user_mods {
+                        cfg.keep_user_mods = true;
+                        let _ = cfg.save();
+                    }
+                    PathBuf::from(&cfg.instance_dir)
                 };
 
-                let _ = ui_w.upgrade_in_event_loop(|ui| {
-                    ui.set_status_banner_text("Installing mod from Modrinth...".into());
-                });
+                let ver_opt = if vid.is_empty() {
+                    None
+                } else {
+                    Some(vid.as_str())
+                };
 
-                match install_modrinth_mod(&client, &pid, None, &mc_ver, &loader, &instance_dir).await {
+                let res = install_modrinth_mod(
+                    &client,
+                    &pid,
+                    Some(project_type.as_str()),
+                    ver_opt,
+                    &mc_ver,
+                    &loader,
+                    &instance_dir,
+                )
+                .await;
+
+                let pid_done = pid.clone();
+                let vid_done = vid.clone();
+                match res {
                     Ok(entry) => {
                         let filename = entry.filename;
+                        let ui_w2 = ui_w.clone();
+                        let client_c = client.clone();
+                        let cache_c = cache.clone();
+                        let seq_c = seq.clone();
                         let _ = ui_w.upgrade_in_event_loop(move |ui| {
-                            ui.set_status_banner_text(format!("Installed {}", filename).into());
+                            set_mod_installing_state(&ui, &pid_done, &vid_done, false);
+                            let mut c = ui.get_config();
+                            c.keep_user_mods = true;
+                            ui.set_config(c);
+                            ui.set_mod_notice_text(format!("Installed {}", filename).into());
+                            let filter_str = ui.get_mod_installed_filter().to_string();
+                            let cat_str = ui.get_mod_installed_category().to_string();
+                            refresh_installed_mods(ui_w2.clone(), &instance_dir, &filter_str, &cat_str, cache_c.clone());
+                            trigger_modrinth_search(ui_w2, client_c, cache_c, seq_c, 0);
                         });
-                        refresh_installed_mods(ui_w, &instance_dir);
                     }
                     Err(e) => {
                         let err_str = e.to_string();
                         let _ = ui_w.upgrade_in_event_loop(move |ui| {
-                            ui.set_status_banner_text(format!("Failed to install mod: {}", err_str).into());
+                            set_mod_installing_state(&ui, &pid_done, &vid_done, false);
+                            ui.set_mod_notice_text(
+                                format!("Failed to install: {}", err_str).into(),
+                            );
                         });
                     }
                 }
@@ -419,20 +902,62 @@ async fn main() -> Result<()> {
         });
     }
 
+    // --- Installed Content Filter, Category, Toggle & Delete Callbacks ---
     {
         let ui_w = ui_handle.clone();
         let cfg_arc = config.clone();
+        let cache = icon_cache.clone();
+        main_window.on_mod_installed_category_selected(move |cat| {
+            let instance_dir = {
+                let cfg = cfg_arc.lock().unwrap();
+                PathBuf::from(&cfg.instance_dir)
+            };
+            let (filter_str, cat_str) = if let Some(ui) = ui_w.upgrade() {
+                (ui.get_mod_installed_filter().to_string(), cat.to_string())
+            } else {
+                (String::new(), cat.to_string())
+            };
+            refresh_installed_mods(ui_w.clone(), &instance_dir, &filter_str, &cat_str, cache.clone());
+        });
+    }
+
+    {
+        let ui_w = ui_handle.clone();
+        let cfg_arc = config.clone();
+        let cache = icon_cache.clone();
+        main_window.on_mod_installed_filter_edited(move |filter| {
+            let instance_dir = {
+                let cfg = cfg_arc.lock().unwrap();
+                PathBuf::from(&cfg.instance_dir)
+            };
+            let cat_str = ui_w
+                .upgrade()
+                .map(|ui| ui.get_mod_installed_category().to_string())
+                .unwrap_or_else(|| "all".to_string());
+            refresh_installed_mods(ui_w.clone(), &instance_dir, filter.as_str(), &cat_str, cache.clone());
+        });
+    }
+
+    {
+        let ui_w = ui_handle.clone();
+        let cfg_arc = config.clone();
+        let cache = icon_cache.clone();
         main_window.on_mod_toggle_clicked(move |filename| {
             let f = filename.to_string();
             let ui_w = ui_w.clone();
             let cfg_arc = cfg_arc.clone();
+            let cache = cache.clone();
+            let (filter_str, cat_str) = ui_w
+                .upgrade()
+                .map(|ui| (ui.get_mod_installed_filter().to_string(), ui.get_mod_installed_category().to_string()))
+                .unwrap_or_default();
             tokio::spawn(async move {
                 let instance_dir = {
                     let cfg = cfg_arc.lock().unwrap();
                     PathBuf::from(&cfg.instance_dir)
                 };
                 let _ = toggle_or_delete_installed_mod(&instance_dir, &f, false);
-                refresh_installed_mods(ui_w, &instance_dir);
+                refresh_installed_mods(ui_w, &instance_dir, &filter_str, &cat_str, cache);
             });
         });
     }
@@ -440,17 +965,23 @@ async fn main() -> Result<()> {
     {
         let ui_w = ui_handle.clone();
         let cfg_arc = config.clone();
+        let cache = icon_cache.clone();
         main_window.on_mod_delete_clicked(move |filename| {
             let f = filename.to_string();
             let ui_w = ui_w.clone();
             let cfg_arc = cfg_arc.clone();
+            let cache = cache.clone();
+            let (filter_str, cat_str) = ui_w
+                .upgrade()
+                .map(|ui| (ui.get_mod_installed_filter().to_string(), ui.get_mod_installed_category().to_string()))
+                .unwrap_or_default();
             tokio::spawn(async move {
                 let instance_dir = {
                     let cfg = cfg_arc.lock().unwrap();
                     PathBuf::from(&cfg.instance_dir)
                 };
                 let _ = toggle_or_delete_installed_mod(&instance_dir, &f, true);
-                refresh_installed_mods(ui_w, &instance_dir);
+                refresh_installed_mods(ui_w, &instance_dir, &filter_str, &cat_str, cache);
             });
         });
     }
@@ -480,11 +1011,383 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+fn update_ui_accounts(
+    ui: &MainWindow,
+    cfg: &LauncherConfig,
+    client: &Client,
+    ui_handle: slint::Weak<MainWindow>,
+) {
+    if let Some(acc) = &cfg.account {
+        ui.set_account(AccountData {
+            logged_in: true,
+            username: acc.username.clone().into(),
+            uuid: acc.uuid.clone().into(),
+            avatar: Image::default(),
+            has_avatar: false,
+        });
+        spawn_load_account_avatar(
+            ui_handle.clone(),
+            client.clone(),
+            acc.skin_url.clone(),
+            acc.uuid.clone(),
+            acc.username.clone(),
+        );
+    } else {
+        ui.set_account(AccountData {
+            logged_in: false,
+            username: "".into(),
+            uuid: "".into(),
+            avatar: Image::default(),
+            has_avatar: false,
+        });
+    }
+
+    let active_uuid = cfg.account.as_ref().map(|a| a.uuid.as_str()).unwrap_or("");
+    let stored_list: Vec<StoredAccountData> = cfg
+        .accounts
+        .iter()
+        .map(|a| {
+            spawn_load_account_avatar(
+                ui_handle.clone(),
+                client.clone(),
+                a.skin_url.clone(),
+                a.uuid.clone(),
+                a.username.clone(),
+            );
+            StoredAccountData {
+                username: a.username.clone().into(),
+                uuid: a.uuid.clone().into(),
+                is_active: a.uuid == active_uuid,
+                avatar: Image::default(),
+                has_avatar: false,
+            }
+        })
+        .collect();
+    ui.set_all_accounts(ModelRc::new(VecModel::from(stored_list)));
+}
+
+fn spawn_load_account_avatar(
+    ui_w: slint::Weak<MainWindow>,
+    client: Client,
+    skin_url: Option<String>,
+    uuid: String,
+    username: String,
+) {
+    tokio::spawn(async move {
+        // 1. Direct authoritative Mojang skin texture URL from profile
+        if let Some(url) = skin_url {
+            if !url.is_empty() {
+                if let Ok(resp) = client.get(&url).send().await {
+                    if resp.status().is_success() {
+                        if let Ok(bytes) = resp.bytes().await {
+                            if let Some(buf) = extract_head_from_skin(&bytes, 32) {
+                                let u_clone = uuid.clone();
+                                let _ = ui_w.upgrade_in_event_loop(move |ui| {
+                                    let mut acc = ui.get_account();
+                                    if acc.uuid.as_str() == u_clone {
+                                        acc.avatar = Image::from_rgba8(buf.clone());
+                                        acc.has_avatar = true;
+                                        ui.set_account(acc);
+                                    }
+                                    let all = ui.get_all_accounts();
+                                    for i in 0..all.row_count() {
+                                        if let Some(mut r) = all.row_data(i) {
+                                            if r.uuid.as_str() == u_clone {
+                                                r.avatar = Image::from_rgba8(buf.clone());
+                                                r.has_avatar = true;
+                                                all.set_row_data(i, r);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                });
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Fallbacks: UUID-based render endpoints (clean UUID without hyphens), then username
+        let clean_uuid = uuid.replace('-', "");
+        let mut urls = Vec::new();
+        if !clean_uuid.is_empty() {
+            urls.push(format!("https://mc-heads.net/avatar/{}/64", clean_uuid));
+            urls.push(format!("https://minotar.net/helm/{}/64.png", clean_uuid));
+        }
+        if !username.is_empty() {
+            urls.push(format!("https://mc-heads.net/avatar/{}/64", username));
+            urls.push(format!("https://minotar.net/helm/{}/64.png", username));
+        }
+
+        for url in urls {
+            if let Ok(resp) = client.get(&url).send().await {
+                if resp.status().is_success() {
+                    if let Ok(bytes) = resp.bytes().await {
+                        if let Some(buf) = decode_image_to_buffer(&bytes, 32) {
+                            let u_clone = uuid.clone();
+                            let _ = ui_w.upgrade_in_event_loop(move |ui| {
+                                let mut acc = ui.get_account();
+                                if acc.uuid.as_str() == u_clone {
+                                    acc.avatar = Image::from_rgba8(buf.clone());
+                                    acc.has_avatar = true;
+                                    ui.set_account(acc);
+                                }
+                                let all = ui.get_all_accounts();
+                                for i in 0..all.row_count() {
+                                    if let Some(mut r) = all.row_data(i) {
+                                        if r.uuid.as_str() == u_clone {
+                                            r.avatar = Image::from_rgba8(buf.clone());
+                                            r.has_avatar = true;
+                                            all.set_row_data(i, r);
+                                            break;
+                                        }
+                                    }
+                                }
+                            });
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
+fn trigger_modrinth_search(
+    ui_w: slint::Weak<MainWindow>,
+    client: Client,
+    icon_cache: IconCache,
+    search_seq: Arc<AtomicU64>,
+    debounce_ms: u64,
+) {
+    let my_seq = search_seq.fetch_add(1, Ordering::SeqCst) + 1;
+
+    tokio::spawn(async move {
+        if debounce_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(debounce_ms)).await;
+            if search_seq.load(Ordering::SeqCst) != my_seq {
+                return;
+            }
+        }
+        run_modrinth_search_from_ui(ui_w, client, icon_cache, search_seq, my_seq).await;
+    });
+}
+
+async fn run_modrinth_search_from_ui(
+    ui_w: slint::Weak<MainWindow>,
+    client: Client,
+    icon_cache: IconCache,
+    search_seq: Arc<AtomicU64>,
+    my_seq: u64,
+) {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let _ = ui_w.upgrade_in_event_loop(move |ui| {
+        ui.set_mod_is_searching(true);
+        let q = ui.get_mod_search_query().to_string();
+        let pt = ui.get_mod_filter_project_type().to_string();
+        let mc = ui.get_mod_filter_mc_version().to_string();
+        let ld = ui.get_mod_filter_loader().to_string();
+        let st = ui.get_mod_filter_sort().to_string();
+        let inst_dir = ui.get_config().instance_dir.to_string();
+        let _ = tx.send((q, pt, mc, ld, st, inst_dir));
+    });
+
+    let Ok((query, project_type, mc_ver, loader, sort, inst_dir)) = rx.await else {
+        return;
+    };
+
+    let hits = search_modrinth_mods(
+        &client,
+        &query,
+        Some(project_type.as_str()),
+        Some(mc_ver.as_str()),
+        Some(loader.as_str()),
+        Some(sort.as_str()),
+    )
+    .await
+    .unwrap_or_default();
+
+    if search_seq.load(Ordering::SeqCst) != my_seq {
+        return;
+    }
+
+    let installed_map = get_installed_modrinth_projects(Path::new(&inst_dir));
+
+    // Collect icon URLs that need downloading
+    let mut missing_icons: Vec<(String, String)> = Vec::new();
+    let cached_snapshot: HashMap<String, IconBuffer> = {
+        let guard = icon_cache.lock().unwrap();
+        let mut map = HashMap::new();
+        for h in &hits {
+            if let Some(url) = &h.icon_url {
+                if let Some(buf) = guard.get(url) {
+                    map.insert(h.project_id.clone(), buf.clone());
+                } else {
+                    missing_icons.push((h.project_id.clone(), url.clone()));
+                }
+            }
+        }
+        map
+    };
+
+    let ui_w_hits = ui_w.clone();
+    let seq_check = search_seq.clone();
+    let _ = ui_w_hits.upgrade_in_event_loop(move |ui| {
+        if seq_check.load(Ordering::SeqCst) != my_seq {
+            return;
+        }
+        let items: Vec<ModHitData> = hits
+            .into_iter()
+            .map(|h| {
+                let (icon, has_icon) = if let Some(buf) = cached_snapshot.get(&h.project_id) {
+                    (Image::from_rgba8(buf.clone()), true)
+                } else {
+                    (Image::default(), false)
+                };
+                let (is_installed, installed_version, installed_filename) =
+                    if let Some(inst) = installed_map.get(&h.project_id) {
+                        (true, inst.version_number.clone(), inst.filename.clone())
+                    } else {
+                        (false, String::new(), String::new())
+                    };
+
+                ModHitData {
+                    project_id: h.project_id.into(),
+                    slug: h.slug.into(),
+                    title: h.title.into(),
+                    description: h.description.into(),
+                    author: h.author.into(),
+                    downloads: format_downloads(h.downloads).into(),
+                    icon,
+                    has_icon,
+                    installing: false,
+                    versions_expanded: false,
+                    project_type: h.project_type.unwrap_or_else(|| "mod".to_string()).into(),
+                    is_installed,
+                    installed_version: installed_version.into(),
+                    installed_filename: installed_filename.into(),
+                }
+            })
+            .collect();
+        ui.set_mod_search_results(ModelRc::new(VecModel::from(items)));
+        ui.set_mod_is_searching(false);
+    });
+
+    // Asynchronously download & decode missing mod icons (bounded concurrency)
+    let sem = Arc::new(tokio::sync::Semaphore::new(6));
+    for (project_id, url) in missing_icons {
+        if search_seq.load(Ordering::SeqCst) != my_seq {
+            break;
+        }
+        let sem_c = sem.clone();
+        let client_c = client.clone();
+        let cache_c = icon_cache.clone();
+        let ui_c = ui_w.clone();
+        let seq_c = search_seq.clone();
+
+        tokio::spawn(async move {
+            let Ok(_permit) = sem_c.acquire().await else {
+                return;
+            };
+            if seq_c.load(Ordering::SeqCst) != my_seq {
+                return;
+            }
+            if let Ok(resp) = client_c.get(&url).send().await {
+                if resp.status().is_success() {
+                    if let Ok(bytes) = resp.bytes().await {
+                        if let Some(buf) = decode_image_to_buffer(&bytes, 44) {
+                            {
+                                let mut guard = cache_c.lock().unwrap();
+                                if guard.len() >= 160 {
+                                    guard.clear();
+                                }
+                                guard.insert(url, buf.clone());
+                            }
+                            let _ = ui_c.upgrade_in_event_loop(move |ui| {
+                                let model = ui.get_mod_search_results();
+                                for i in 0..model.row_count() {
+                                    if let Some(mut row) = model.row_data(i) {
+                                        if row.project_id.as_str() == project_id {
+                                            row.icon = Image::from_rgba8(buf.clone());
+                                            row.has_icon = true;
+                                            model.set_row_data(i, row);
+                                            break;
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+        });
+    }
+}
+
+fn set_mod_installing_state(ui: &MainWindow, project_id: &str, version_id: &str, installing: bool) {
+    let model = ui.get_mod_search_results();
+    for i in 0..model.row_count() {
+        if let Some(mut row) = model.row_data(i) {
+            if row.project_id.as_str() == project_id {
+                row.installing = installing;
+                model.set_row_data(i, row);
+                break;
+            }
+        }
+    }
+    if !version_id.is_empty() {
+        let vmodel = ui.get_mod_expanded_versions();
+        for i in 0..vmodel.row_count() {
+            if let Some(mut vrow) = vmodel.row_data(i) {
+                if vrow.id.as_str() == version_id {
+                    vrow.installing = installing;
+                    vmodel.set_row_data(i, vrow);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn refresh_console_logs_view(
+    ui_w: &slint::Weak<MainWindow>,
+    logs_arc: &Arc<Mutex<Vec<GameLogEntry>>>,
+    filter_level: &str,
+) {
+    let (filtered, err_count) = {
+        let guard = logs_arc.lock().unwrap();
+        let errs = guard.iter().filter(|l| l.level == "ERROR").count() as i32;
+        let list: Vec<LogEntryData> = guard
+            .iter()
+            .filter(|l| filter_level == "ALL" || l.level == filter_level)
+            .map(|l| LogEntryData {
+                timestamp: l.timestamp.clone().into(),
+                level: l.level.clone().into(),
+                line: l.line.clone().into(),
+            })
+            .collect();
+        (list, errs)
+    };
+
+    let _ = ui_w.upgrade_in_event_loop(move |ui| {
+        ui.set_console_logs(ModelRc::new(VecModel::from(filtered)));
+        ui.set_console_error_count(err_count);
+    });
+}
+
 async fn refresh_dashboard_and_ping(
     ui_w: slint::Weak<MainWindow>,
     cfg_arc: Arc<Mutex<LauncherConfig>>,
     client: Client,
+    icon_cache: IconCache,
+    mod_filters_initialized: Arc<AtomicBool>,
 ) {
+    let _ = ui_w.upgrade_in_event_loop(|ui| {
+        ui.set_is_refreshing(true);
+    });
+
     let (manifest_url, host, port, instance_dir) = {
         let cfg = cfg_arc.lock().unwrap();
         (
@@ -495,50 +1398,194 @@ async fn refresh_dashboard_and_ping(
         )
     };
 
-    let check = fetch_or_fallback_manifest(&client, &manifest_url, &host, port, &instance_dir).await;
-    let s_status = ping_minecraft_server(&check.manifest.server_host, check.manifest.server_port).await;
+    let check =
+        fetch_or_fallback_manifest(&client, &manifest_url, &host, port, &instance_dir).await;
+    let s_status =
+        ping_minecraft_server(&check.manifest.server_host, check.manifest.server_port).await;
+
+    let init_filters = !mod_filters_initialized.swap(true, Ordering::SeqCst);
+    let ui_w2 = ui_w.clone();
+    let cache_clone = icon_cache.clone();
 
     let _ = ui_w.upgrade_in_event_loop(move |ui| {
+        ui.set_is_refreshing(false);
+
         ui.set_server_status(ServerStatusData {
             online: s_status.online,
+            host: s_status.host.into(),
+            port: s_status.port as i32,
             motd: s_status.motd.into(),
             players_online: s_status.players_online as i32,
             players_max: s_status.players_max as i32,
             latency_ms: s_status.latency_ms.unwrap_or(0) as i32,
+            has_latency: s_status.latency_ms.is_some(),
         });
+
+        let loader_str = format!("{:?}", check.manifest.loader);
+        if init_filters {
+            ui.set_mod_filter_mc_version(check.manifest.minecraft_version.clone().into());
+            ui.set_mod_filter_loader(loader_str.to_lowercase().into());
+        }
+
+        if check.is_offline_fallback {
+            if let Some(w) = &check.offline_warning {
+                ui.set_status_banner_type("warn".into());
+                ui.set_status_banner_text(w.clone().into());
+            }
+        }
 
         ui.set_modpack(ModpackData {
             name: check.manifest.name.into(),
             version: check.manifest.version.into(),
             mc_version: check.manifest.minecraft_version.into(),
-            loader: format!("{:?}", check.manifest.loader).into(),
+            loader: loader_str.to_uppercase().into(),
             loader_version: check.manifest.loader_version.into(),
             server_host: check.manifest.server_host.into(),
             server_port: check.manifest.server_port as i32,
             update_available: check.update_available,
+            is_offline_fallback: check.is_offline_fallback,
+            is_mrpack: check.manifest.mrpack_url.is_some(),
+            news: check
+                .manifest
+                .news
+                .unwrap_or_else(|| "No announcement posted in the remote manifest.".to_string())
+                .into(),
         });
-    });
 
-    refresh_installed_mods(ui_w, &instance_dir);
+        let filter_str = ui.get_mod_installed_filter().to_string();
+        let cat_str = ui.get_mod_installed_category().to_string();
+        refresh_installed_mods(ui_w2, &instance_dir, &filter_str, &cat_str, cache_clone);
+    });
 }
 
-fn refresh_installed_mods(ui_w: slint::Weak<MainWindow>, instance_dir: &Path) {
+struct RawInstalledModEntry {
+    filename: String,
+    size_kb: i32,
+    enabled: bool,
+    is_user_mod: bool,
+    category: String,
+    icon_buf: Option<IconBuffer>,
+}
+
+fn refresh_installed_mods(
+    ui_w: slint::Weak<MainWindow>,
+    instance_dir: &Path,
+    filter: &str,
+    category_filter: &str,
+    icon_cache: IconCache,
+) {
     if let Ok(mods) = list_installed_mods(instance_dir) {
-        let items: Vec<InstalledModData> = mods
-            .into_iter()
-            .map(|m| {
-                let disp = m.filename.trim_end_matches(".disabled").to_string();
+        let needle = filter.trim().to_lowercase();
+        let cat = category_filter.trim().to_lowercase();
+        let mut user_items: Vec<RawInstalledModEntry> = Vec::new();
+        let mut pack_items: Vec<RawInstalledModEntry> = Vec::new();
+
+        let cached_map = {
+            let guard = icon_cache.lock().unwrap();
+            guard.clone()
+        };
+
+        let mut to_extract: Vec<(PathBuf, String)> = Vec::new();
+
+        for m in mods {
+            if cat != "all" && m.category != cat {
+                continue;
+            }
+            if !needle.is_empty() && !m.filename.to_lowercase().contains(&needle) {
+                continue;
+            }
+
+            let cache_key = format!("archive://{}/{}", m.category, m.filename);
+            let icon_buf = if let Some(buf) = cached_map.get(&cache_key) {
+                Some(buf.clone())
+            } else {
+                let file_path = instance_dir.join(&m.category).join(&m.filename);
+                to_extract.push((file_path, cache_key.clone()));
+                None
+            };
+
+            let item = RawInstalledModEntry {
+                filename: m.filename,
+                size_kb: m.size_kb as i32,
+                enabled: m.enabled,
+                is_user_mod: m.is_user_mod,
+                category: m.category,
+                icon_buf,
+            };
+            if item.is_user_mod {
+                user_items.push(item);
+            } else {
+                pack_items.push(item);
+            }
+        }
+
+        let _ = ui_w.upgrade_in_event_loop(move |ui| {
+            let map_fn = |m: RawInstalledModEntry| {
+                let (icon, has_icon) = if let Some(buf) = m.icon_buf {
+                    (Image::from_rgba8(buf), true)
+                } else {
+                    (Image::default(), false)
+                };
                 InstalledModData {
                     filename: m.filename.into(),
-                    display_name: disp.into(),
-                    is_disabled: !m.enabled,
-                    is_user_added: m.is_user_mod,
+                    size_kb: m.size_kb,
+                    enabled: m.enabled,
+                    is_user_mod: m.is_user_mod,
+                    category: m.category.into(),
+                    icon,
+                    has_icon,
                 }
-            })
-            .collect();
-        let _ = ui_w.upgrade_in_event_loop(move |ui| {
-            ui.set_installed_mods(ModelRc::new(VecModel::from(items)));
+            };
+            let u_data: Vec<InstalledModData> = user_items.into_iter().map(map_fn).collect();
+            let p_data: Vec<InstalledModData> = pack_items.into_iter().map(map_fn).collect();
+            ui.set_user_mods(ModelRc::new(VecModel::from(u_data)));
+            ui.set_pack_mods(ModelRc::new(VecModel::from(p_data)));
         });
+
+        // Spawn background task to extract icons for archives not yet in cache
+        if !to_extract.is_empty() {
+            let ui_w2 = ui_w.clone();
+            let cache_arc = icon_cache.clone();
+            tokio::task::spawn_blocking(move || {
+                for (path, key) in to_extract {
+                    if let Some(bytes) = extract_icon_from_archive(&path) {
+                        if let Some(buf) = decode_image_to_buffer(&bytes, 32) {
+                            {
+                                let mut guard = cache_arc.lock().unwrap();
+                                guard.insert(key.clone(), buf.clone());
+                            }
+                            let key_clone = key.clone();
+                            let _ = ui_w2.upgrade_in_event_loop(move |ui| {
+                                let umods = ui.get_user_mods();
+                                for i in 0..umods.row_count() {
+                                    if let Some(mut row) = umods.row_data(i) {
+                                        let row_key = format!("archive://{}/{}", row.category, row.filename);
+                                        if row_key == key_clone {
+                                            row.icon = Image::from_rgba8(buf.clone());
+                                            row.has_icon = true;
+                                            umods.set_row_data(i, row);
+                                            break;
+                                        }
+                                    }
+                                }
+                                let pmods = ui.get_pack_mods();
+                                for i in 0..pmods.row_count() {
+                                    if let Some(mut row) = pmods.row_data(i) {
+                                        let row_key = format!("archive://{}/{}", row.category, row.filename);
+                                        if row_key == key_clone {
+                                            row.icon = Image::from_rgba8(buf.clone());
+                                            row.has_icon = true;
+                                            pmods.set_row_data(i, row);
+                                            break;
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                    }
+                }
+            });
+        }
     }
 }
 
@@ -549,11 +1596,6 @@ async fn launch_game_flow(
     logs_arc: Arc<Mutex<Vec<GameLogEntry>>>,
     discord_arc: Arc<DiscordRpcManager>,
 ) {
-    let _ = ui_w.upgrade_in_event_loop(|ui| {
-        ui.set_is_launching(true);
-        ui.set_status_banner_text("Preparing Minecraft launch...".into());
-    });
-
     let mut cfg = {
         let c = cfg_arc.lock().unwrap();
         c.clone()
@@ -564,38 +1606,55 @@ async fn launch_game_flow(
         None => {
             let _ = ui_w.upgrade_in_event_loop(|ui| {
                 ui.set_is_launching(false);
-                ui.set_status_banner_text("Please sign in with Microsoft before launching.".into());
+                ui.set_status_banner_type("warn".into());
+                ui.set_status_banner_text(
+                    "Please sign in with your Microsoft account before launching.".into(),
+                );
                 ui.set_auth_open(true);
             });
             return;
         }
     };
 
+    let _ = ui_w.upgrade_in_event_loop(|ui| {
+        ui.set_is_launching(true);
+        ui.set_status_banner_text("".into());
+        ui.set_progress(ProgressData {
+            active: true,
+            stage: "Preparing launch sequence...".into(),
+            current_file: "".into(),
+            completed: 0,
+            total: 1,
+            percent: 2,
+        });
+    });
+
     // Helper logger pushing to memory and Slint UI
     let ui_log = ui_w.clone();
     let logs_mem = logs_arc.clone();
+    let logs_for_view = logs_arc.clone();
     let on_log = Arc::new(move |entry: GameLogEntry| {
-        let entry_clone = entry.clone();
+        let _ = entry;
+        let ui_log_c = ui_log.clone();
+        let logs_c = logs_for_view.clone();
         let _ = ui_log.upgrade_in_event_loop(move |ui| {
-            let mut list: Vec<LogEntryData> = ui.get_console_logs().iter().collect();
-            if list.len() >= 500 {
-                list.drain(0..100);
-            }
-            list.push(LogEntryData {
-                timestamp: entry_clone.timestamp.into(),
-                level: entry_clone.level.into(),
-                line: entry_clone.line.into(),
-            });
-            let errs = list.iter().filter(|l| l.level == "ERROR").count() as i32;
-            ui.set_console_logs(ModelRc::new(VecModel::from(list)));
-            ui.set_console_error_count(errs);
+            let filter_lvl = ui.get_console_filter().to_string();
+            refresh_console_logs_view(&ui_log_c, &logs_c, &filter_lvl);
         });
     });
 
     // Check token expiration
     if Utc::now().timestamp() >= account.expires_at && !account.refresh_token.is_empty() {
-        push_log(&*on_log, &logs_mem, "INFO", "Refreshing Microsoft session...".to_string());
-        if let Ok(refreshed) = auth::refresh_minecraft_session(&client, &cfg.azure_client_id, &account.refresh_token).await {
+        push_log(
+            &*on_log,
+            &logs_mem,
+            "INFO",
+            "Refreshing Microsoft authentication session...".to_string(),
+        );
+        if let Ok(refreshed) =
+            auth::refresh_minecraft_session(&client, &cfg.azure_client_id, &account.refresh_token)
+                .await
+        {
             account = refreshed.clone();
             cfg.account = Some(refreshed);
             let _ = cfg.save();
@@ -608,27 +1667,54 @@ async fn launch_game_flow(
     let shared_dir = PathBuf::from(&cfg.shared_dir);
 
     // Fetch manifest & check updates
-    let mut check = fetch_or_fallback_manifest(&client, &cfg.manifest_url, &cfg.server_host, cfg.server_port, &instance_dir).await;
+    let mut check = fetch_or_fallback_manifest(
+        &client,
+        &cfg.manifest_url,
+        &cfg.server_host,
+        cfg.server_port,
+        &instance_dir,
+    )
+    .await;
 
-    if check.update_available {
+    if check.is_offline_fallback {
+        if let Some(warn) = &check.offline_warning {
+            push_log(
+                &*on_log,
+                &logs_mem,
+                "WARN",
+                format!("Offline fallback: {}", warn),
+            );
+        }
+    } else if check.update_available {
         let ui_sync = ui_w.clone();
-        let sync_res = synchronize_modpack(&client, &mut check.manifest, &instance_dir, cfg.keep_user_mods, move |p| {
-            let _ = ui_sync.upgrade_in_event_loop(move |ui| {
-                ui.set_progress(ProgressData {
-                    active: true,
-                    stage: p.stage.into(),
-                    current_file: p.current_file.into(),
-                    completed: p.completed as i32,
-                    total: p.total as i32,
-                    percent: p.percent as i32,
+        let sync_res = synchronize_modpack(
+            &client,
+            &mut check.manifest,
+            &instance_dir,
+            cfg.keep_user_mods,
+            move |p| {
+                let _ = ui_sync.upgrade_in_event_loop(move |ui| {
+                    ui.set_progress(ProgressData {
+                        active: true,
+                        stage: p.stage.into(),
+                        current_file: p.current_file.into(),
+                        completed: p.completed as i32,
+                        total: p.total as i32,
+                        percent: p.percent as i32,
+                    });
                 });
-            });
-        }).await;
+            },
+        )
+        .await;
 
         if let Err(e) = sync_res {
             let err_str = e.to_string();
             let _ = ui_w.upgrade_in_event_loop(move |ui| {
                 ui.set_is_launching(false);
+                let mut p = ui.get_progress();
+                p.active = false;
+                ui.set_progress(p);
+                ui.set_status_banner_type("error".into());
                 ui.set_status_banner_text(format!("Modpack sync failed: {}", err_str).into());
             });
             return;
@@ -640,34 +1726,67 @@ async fn launch_game_flow(
             m.update_available = false;
             ui.set_modpack(m);
         });
+    } else {
+        // Pack is already up to date; load cached manifest so loader/MC versions from .mrpack are preserved
+        let cached_path = instance_dir.join("cached-manifest.json");
+        if let Ok(raw) = std::fs::read_to_string(&cached_path) {
+            if let Ok(cached_manifest) = serde_json::from_str(&raw) {
+                check.manifest = cached_manifest;
+            }
+        }
+        push_log(
+            &*on_log,
+            &logs_mem,
+            "INFO",
+            format!(
+                "Modpack {} v{} is already up to date. Skipping sync.",
+                check.manifest.name, check.manifest.version
+            ),
+        );
     }
 
     // Resolve / download Java runtime
     let ui_prog = ui_w.clone();
-    let _ = ui_prog.upgrade_in_event_loop(|ui| {
+    let mc_ver_label = check.manifest.minecraft_version.clone();
+    let _ = ui_prog.upgrade_in_event_loop(move |ui| {
         ui.set_progress(ProgressData {
             active: true,
-            stage: "Verifying Java Runtime".into(),
-            current_file: "JRE".into(),
+            stage: "Verifying Java Runtime (JRE)".into(),
+            current_file: format!("Minecraft {}", mc_ver_label).into(),
             completed: 1,
             total: 2,
             percent: 50,
         });
     });
 
-    let java_bin = match java::resolve_or_download_java(&client, &check.manifest.minecraft_version, &shared_dir, cfg.java_path.as_deref()).await {
+    let java_bin = match java::resolve_or_download_java(
+        &client,
+        &check.manifest.minecraft_version,
+        &shared_dir,
+        cfg.java_path.as_deref(),
+    )
+    .await
+    {
         Ok(bin) => bin,
         Err(e) => {
             let err_str = e.to_string();
             let _ = ui_w.upgrade_in_event_loop(move |ui| {
                 ui.set_is_launching(false);
-                ui.set_status_banner_text(format!("Java error: {}", err_str).into());
+                let mut p = ui.get_progress();
+                p.active = false;
+                ui.set_progress(p);
+                ui.set_status_banner_type("error".into());
+                ui.set_status_banner_text(format!("Java runtime error: {}", err_str).into());
             });
             return;
         }
     };
 
-    discord_arc.update_status(cfg.discord_rpc_enabled, &format!("Playing {}", check.manifest.name), &format!("{} on {}", account.username, check.manifest.server_host));
+    discord_arc.update_status(
+        cfg.discord_rpc_enabled,
+        &format!("Playing {}", check.manifest.name),
+        &format!("{} on {}", account.username, check.manifest.server_host),
+    );
 
     let ui_prog2 = ui_w.clone();
     let ui_win = ui_w.clone();
@@ -696,12 +1815,12 @@ async fn launch_game_flow(
         Arc::new(move |action| match action {
             WindowAction::HideMain => {
                 let _ = ui_win.upgrade_in_event_loop(|ui| {
-                    ui.window().set_minimized(true);
+                    let _ = ui.hide();
                 });
             }
             WindowAction::ShowAndFocusMain => {
                 let _ = ui_win.upgrade_in_event_loop(|ui| {
-                    ui.window().set_minimized(false);
+                    let _ = ui.show();
                 });
             }
             WindowAction::ExitLauncher => {
@@ -710,15 +1829,24 @@ async fn launch_game_flow(
         }),
         Arc::new(move |exit_ev: loxy_core::launcher::GameExitEvent| {
             let _ = ui_exit.upgrade_in_event_loop(move |ui| {
+                let _ = ui.show();
                 ui.set_is_launching(false);
                 let mut p = ui.get_progress();
                 p.active = false;
                 ui.set_progress(p);
                 if exit_ev.crashed {
                     let code = exit_ev.exit_code.to_string();
-                    ui.set_status_banner_text(format!("Minecraft crashed with exit code {}.", code).into());
+                    ui.set_status_banner_type("error".into());
+                    ui.set_status_banner_text(
+                        format!(
+                            "Minecraft exited with code {}. Inspect the Console for crash details.",
+                            code
+                        )
+                        .into(),
+                    );
                     ui.set_console_open(true);
                 } else {
+                    ui.set_status_banner_type("info".into());
                     ui.set_status_banner_text("Minecraft closed cleanly.".into());
                 }
             });
@@ -730,6 +1858,10 @@ async fn launch_game_flow(
         let err_str = e.to_string();
         let _ = ui_w.upgrade_in_event_loop(move |ui| {
             ui.set_is_launching(false);
+            let mut p = ui.get_progress();
+            p.active = false;
+            ui.set_progress(p);
+            ui.set_status_banner_type("error".into());
             ui.set_status_banner_text(format!("Launch error: {}", err_str).into());
             ui.set_console_open(true);
         });

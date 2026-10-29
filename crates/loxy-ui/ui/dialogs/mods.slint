@@ -1,289 +1,1248 @@
-import { McTheme, McButton, McIconButton } from "../theme.slint";
-import { ModHitData, InstalledModData } from "../models.slint";
-import { ListView } from "std-widgets.slint";
+import { McTheme, McButton, McIconButton, McTextInput } from "../theme.slint";
+import { ModHitData, ModVersionData, InstalledModData } from "../models.slint";
+import { ScrollView } from "std-widgets.slint";
 
 export component ModsDialog inherits Rectangle {
     in property <bool> is-open: false;
     in-out property <int> active-tab: 0; // 0 = browse, 1 = installed
-    
-    // Search properties
+    in-out property <bool> keep-user-mods: true;
+    in-out property <string> notice-text: "";
+
+    // Browse / Search properties
     in-out property <string> search-query: "";
+    in-out property <string> filter-project-type: "mod"; // "mod", "resourcepack", "shader", "datapack"
+    in-out property <string> filter-mc-version: "1.21.1";
+    in-out property <string> filter-loader: "fabric";
+    in-out property <string> filter-sort: "relevance";
     in property <[ModHitData]> search-results: [];
     in property <bool> is-searching: false;
-    
-    // Installed properties
-    in property <[InstalledModData]> installed-mods: [];
-    
+
+    // Version Picker Drawer properties
+    in property <string> expanded-project-id: "";
+    in property <bool> loading-versions: false;
+    in property <[ModVersionData]> expanded-project-versions: [];
+
+    // Installed Content properties (pre-filtered and split into User vs Modpack)
+    in-out property <string> installed-filter: "";
+    in-out property <string> installed-category: "all"; // "all", "mods", "resourcepacks", "shaderpacks", "datapacks"
+    in property <[InstalledModData]> user-mods: [];
+    in property <[InstalledModData]> pack-mods: [];
+    in-out property <bool> user-mods-collapsed: false;
+    in-out property <bool> pack-mods-collapsed: false;
+
+    // Callbacks
+    callback toggle-keep-user-mods();
+    callback project-type-selected(string);
+    callback search-edited(string);
     callback search-triggered(string);
-    callback install-mod-clicked(string); // project_id
+    callback mc-version-filter-edited(string);
+    callback toggle-mc-version-all();
+    callback loader-filter-selected(string);
+    callback sort-filter-selected(string);
+    callback toggle-versions-clicked(string); // project_id
+    callback install-mod-clicked(string, string); // (project_id, version_id or "")
+    callback installed-filter-edited(string);
+    callback installed-category-selected(string);
     callback toggle-mod-clicked(string); // filename
     callback delete-mod-clicked(string); // filename
     callback close-clicked();
-    
+
     visible: root.is-open;
-    background: #000000bb;
-    TouchArea {}
-    
+    background: #000000cc;
+
+    // Backdrop click-to-dismiss
+    TouchArea {
+        clicked => { root.close-clicked(); }
+    }
+
     Rectangle {
-        width: 780px;
-        height: 560px;
+        width: 840px;
+        height: 590px;
         background: McTheme.panel-bg;
-        border-color: McTheme.panel-border-highlight;
-        border-width: 1px;
-        
+        border-color: McTheme.panel-border;
+        border-width: 2px;
+
+        // Absorb clicks inside the dialog panel
+        TouchArea {}
+
         VerticalLayout {
-            padding: 18px;
-            spacing: 12px;
-            
+            padding: 16px;
+            spacing: 10px;
+
+            // 1. Dialog Header Bar
             HorizontalLayout {
                 alignment: space-between;
-                
-                HorizontalLayout {
-                    spacing: 12px;
-                    alignment: start;
+
+                VerticalLayout {
+                    alignment: center;
                     Text {
-                        text: "MOD MANAGER";
-                        font-size: 15px;
+                        text: "MOD MANAGER (MODRINTH & INSTALLED)";
+                        font-size: 14px;
                         font-weight: 700;
-                        color: McTheme.text-primary;
-                        vertical-alignment: center;
-                    }
-                    
-                    HorizontalLayout {
-                        spacing: 6px;
-                        McButton {
-                            text: "BROWSE MODRINTH";
-                            primary: root.active-tab == 0;
-                            font-size: 11px;
-                            clicked => { root.active-tab = 0; }
-                        }
-                        McButton {
-                            text: "INSTALLED MODS (" + root.installed-mods.length + ")";
-                            primary: root.active-tab == 1;
-                            font-size: 11px;
-                            clicked => { root.active-tab = 1; }
-                        }
+                        color: #ce93d8;
                     }
                 }
-                
-                McIconButton {
-                    clicked => { root.close-clicked(); }
-                }
-            }
-            
-            // Tab 0: Browse Modrinth
-            if root.active-tab == 0 : VerticalLayout {
-                spacing: 10px;
-                vertical-stretch: 1;
-                
-                // Search bar
+
                 HorizontalLayout {
                     spacing: 8px;
+                    alignment: end;
+
+                    McButton {
+                        text: "SEARCH MODRINTH";
+                        primary: root.active-tab == 0;
+                        font-size: 11px;
+                        h-padding: 12px;
+                        v-padding: 6px;
+                        clicked => { root.active-tab = 0; }
+                    }
+
+                    McButton {
+                        text: "INSTALLED (" + (root.user-mods.length + root.pack-mods.length) + ")";
+                        primary: root.active-tab == 1;
+                        font-size: 11px;
+                        h-padding: 12px;
+                        v-padding: 6px;
+                        clicked => { root.active-tab = 1; }
+                    }
+
                     Rectangle {
-                        background: #141414;
-                        border-color: #333333;
-                        border-width: 1px;
-                        height: 36px;
-                        horizontal-stretch: 1;
-                        
-                        search-input := TextInput {
-                            text <=> root.search-query;
-                            color: McTheme.text-primary;
-                            font-size: 12px;
-                            vertical-alignment: center;
-                            x: 10px;
-                            width: parent.width - 20px;
-                            accepted => { root.search-triggered(self.text); }
+                        width: 26px;
+                        height: 26px;
+                        McIconButton {
+                            width: 26px;
+                            height: 26px;
+                            text: "X";
+                            clicked => { root.close-clicked(); }
                         }
                     }
-                    
-                    McButton {
-                        text: root.is-searching ? "SEARCHING..." : "SEARCH";
-                        primary: true;
-                        disabled: root.is-searching;
-                        clicked => { root.search-triggered(root.search-query); }
+                }
+            }
+
+            // Divider
+            Rectangle {
+                height: 2px;
+                background: #181818;
+            }
+
+            // 2. Keep User Mods Toggle Bar
+            Rectangle {
+                height: 32px;
+                background: McTheme.inset-bg;
+                border-color: McTheme.inset-border;
+                border-width: 1px;
+
+                TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.toggle-keep-user-mods(); }
+                }
+
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    spacing: 8px;
+                    alignment: start;
+
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 16px;
+                            height: 16px;
+                            background: root.keep-user-mods ? #2e7d32 : #1e1e1e;
+                            border-color: root.keep-user-mods ? #66bb6a : #555555;
+                            border-width: 1px;
+
+                            if root.keep-user-mods : Text {
+                                width: 100%;
+                                height: 100%;
+                                text: "✓";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: #ffffff;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+                        Text {
+                            text: "Allow user-installed mods (preserve custom mods in mods/ folder during pack sync)";
+                            font-size: 11px;
+                            font-weight: 700;
+                            color: #a5d6a7;
+                        }
                     }
                 }
-                
-                // Mod Cards List
+            }
+
+            // 3. Optional Notice Banner
+            if root.notice-text != "" : Rectangle {
+                height: 30px;
+                background: #2b2111;
+                border-color: #f59e0b;
+                border-width: 1px;
+
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    alignment: space-between;
+
+                    VerticalLayout {
+                        alignment: center;
+                        Text {
+                            text: root.notice-text;
+                            font-size: 11px;
+                            color: #fde68a;
+                            overflow: elide;
+                        }
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+                        McButton {
+                            text: "DISMISS";
+                            font-size: 9px;
+                            h-padding: 8px;
+                            v-padding: 3px;
+                            clicked => { root.notice-text = ""; }
+                        }
+                    }
+                }
+            }
+
+            // =========================================================
+            // TAB 0: BROWSE & SEARCH MODRINTH
+            // =========================================================
+            if root.active-tab == 0 : VerticalLayout {
+                vertical-stretch: 1;
+                spacing: 8px;
+
+                // Search & Filters Box
                 Rectangle {
-                    background: #0f0f0f;
-                    border-color: #262626;
+                    background: McTheme.inset-bg;
+                    border-color: McTheme.inset-border;
                     border-width: 1px;
+
+                    VerticalLayout {
+                        padding: 10px;
+                        spacing: 8px;
+
+                        // Row 1: Real-time Search Input + Clear Button
+                        HorizontalLayout {
+                            spacing: 8px;
+
+                            McTextInput {
+                                horizontal-stretch: 1;
+                                box-height: 32px;
+                                text <=> root.search-query;
+                                placeholder: root.filter-project-type == "resourcepack" ? "Search Modrinth Resource Packs (e.g. Faithful, Fresh Animations)..." :
+                                             (root.filter-project-type == "shader" ? "Search Modrinth Shaders (e.g. Complementary, BSL, Bliss)..." :
+                                             (root.filter-project-type == "datapack" ? "Search Modrinth Datapacks (e.g. Terralith, Incendium)..." :
+                                             "Search Modrinth Mods in real time (e.g. Sodium, Iris, Journeymap)..."));
+                                edited(q) => { root.search-edited(q); }
+                                accepted(q) => { root.search-triggered(q); }
+                            }
+
+                            if root.search-query != "" : McButton {
+                                text: "CLEAR";
+                                font-size: 10px;
+                                h-padding: 8px;
+                                v-padding: 5px;
+                                horizontal-stretch: 0;
+                                clicked => {
+                                    root.search-query = "";
+                                    root.search-edited("");
+                                }
+                            }
+                        }
+
+                        // Row 2: Content Type Selector (Mods, Resource Packs, Shaders, Datapacks)
+                        HorizontalLayout {
+                            spacing: 6px;
+                            alignment: start;
+
+                            VerticalLayout {
+                                alignment: center;
+                                Text {
+                                    text: "CONTENT:";
+                                    font-size: 10px;
+                                    font-weight: 700;
+                                    color: #888888;
+                                }
+                            }
+
+                            McButton {
+                                text: "MODS";
+                                primary: root.filter-project-type == "mod";
+                                font-size: 9px;
+                                h-padding: 8px;
+                                v-padding: 4px;
+                                clicked => { root.project-type-selected("mod"); }
+                            }
+
+                            McButton {
+                                text: "RESOURCE PACKS";
+                                primary: root.filter-project-type == "resourcepack";
+                                font-size: 9px;
+                                h-padding: 8px;
+                                v-padding: 4px;
+                                clicked => { root.project-type-selected("resourcepack"); }
+                            }
+
+                            McButton {
+                                text: "SHADERS";
+                                primary: root.filter-project-type == "shader";
+                                font-size: 9px;
+                                h-padding: 8px;
+                                v-padding: 4px;
+                                clicked => { root.project-type-selected("shader"); }
+                            }
+
+                            McButton {
+                                text: "DATAPACKS";
+                                primary: root.filter-project-type == "datapack";
+                                font-size: 9px;
+                                h-padding: 8px;
+                                v-padding: 4px;
+                                clicked => { root.project-type-selected("datapack"); }
+                            }
+                        }
+
+                        // Row 3: Filters (MC Version Override, Loader, Sort)
+                        HorizontalLayout {
+                            spacing: 12px;
+                            alignment: space-between;
+
+                            // MC Version Override
+                            HorizontalLayout {
+                                spacing: 6px;
+                                alignment: start;
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    Text {
+                                        text: "MC:";
+                                        font-size: 11px;
+                                        color: #aaaaaa;
+                                    }
+                                }
+
+                                McTextInput {
+                                    width: 85px;
+                                    box-height: 26px;
+                                    font-size: 11px;
+                                    text <=> root.filter-mc-version;
+                                    placeholder: "all";
+                                    edited(v) => { root.mc-version-filter-edited(v); }
+                                    accepted(v) => { root.mc-version-filter-edited(v); }
+                                }
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    McButton {
+                                        text: root.filter-mc-version == "all" ? "PACK VER" : "ALL";
+                                        font-size: 9px;
+                                        h-padding: 8px;
+                                        v-padding: 5px;
+                                        clicked => { root.toggle-mc-version-all(); }
+                                    }
+                                }
+                            }
+
+                            // Loader Filter
+                            HorizontalLayout {
+                                spacing: 4px;
+                                alignment: center;
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    Text {
+                                        text: "Loader:";
+                                        font-size: 11px;
+                                        color: #aaaaaa;
+                                    }
+                                }
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    McButton {
+                                        text: "FABRIC";
+                                        primary: root.filter-loader == "fabric";
+                                        font-size: 9px;
+                                        h-padding: 7px;
+                                        v-padding: 5px;
+                                        clicked => { root.loader-filter-selected("fabric"); }
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    McButton {
+                                        text: "NEOFORGE";
+                                        primary: root.filter-loader == "neoforge";
+                                        font-size: 9px;
+                                        h-padding: 7px;
+                                        v-padding: 5px;
+                                        clicked => { root.loader-filter-selected("neoforge"); }
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    McButton {
+                                        text: "FORGE";
+                                        primary: root.filter-loader == "forge";
+                                        font-size: 9px;
+                                        h-padding: 7px;
+                                        v-padding: 5px;
+                                        clicked => { root.loader-filter-selected("forge"); }
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    McButton {
+                                        text: "ALL";
+                                        primary: root.filter-loader == "all";
+                                        font-size: 9px;
+                                        h-padding: 7px;
+                                        v-padding: 5px;
+                                        clicked => { root.loader-filter-selected("all"); }
+                                    }
+                                }
+                            }
+
+                            // Sort Order Filter
+                            HorizontalLayout {
+                                spacing: 4px;
+                                alignment: end;
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    Text {
+                                        text: "Sort:";
+                                        font-size: 11px;
+                                        color: #aaaaaa;
+                                    }
+                                }
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    McButton {
+                                        text: "RELEVANCE";
+                                        primary: root.filter-sort == "relevance";
+                                        font-size: 9px;
+                                        h-padding: 7px;
+                                        v-padding: 5px;
+                                        clicked => { root.sort-filter-selected("relevance"); }
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    McButton {
+                                        text: "DOWNLOADS";
+                                        primary: root.filter-sort == "downloads";
+                                        font-size: 9px;
+                                        h-padding: 7px;
+                                        v-padding: 5px;
+                                        clicked => { root.sort-filter-selected("downloads"); }
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    McButton {
+                                        text: "UPDATED";
+                                        primary: root.filter-sort == "updated";
+                                        font-size: 9px;
+                                        h-padding: 7px;
+                                        v-padding: 5px;
+                                        clicked => { root.sort-filter-selected("updated"); }
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    McButton {
+                                        text: "NEWEST";
+                                        primary: root.filter-sort == "newest";
+                                        font-size: 9px;
+                                        h-padding: 7px;
+                                        v-padding: 5px;
+                                        clicked => { root.sort-filter-selected("newest"); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Mod Search Results Box
+                Rectangle {
                     vertical-stretch: 1;
-                    
+                    background: McTheme.inset-bg;
+                    border-color: McTheme.inset-border;
+                    border-width: 1px;
+                    clip: true;
+
                     if root.search-results.length == 0 : Text {
-                        text: root.is-searching ? "Searching Modrinth..." : "Type a mod name above and press Search";
-                        color: #666666;
+                        width: 100%;
+                        height: 100%;
+                        text: root.is-searching ? "Searching Modrinth..." : ("No mods found matching filters (MC: " + root.filter-mc-version + ", Loader: " + root.filter-loader + ").");
+                        color: #888888;
                         font-size: 12px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
-                    
-                    ListView {
-                        for mod in root.search-results : Rectangle {
-                            height: 72px;
-                            
-                            Rectangle {
-                                y: parent.height - 1px;
-                                height: 1px;
-                                background: #222222;
-                            }
-                            
-                            HorizontalLayout {
-                                padding-left: 12px;
-                                padding-right: 12px;
-                                spacing: 12px;
-                                alignment: space-between;
-                                
+
+                    ScrollView {
+                        width: 100%;
+                        height: 100%;
+
+                        VerticalLayout {
+                            padding: 8px;
+                            spacing: 8px;
+                            alignment: start;
+
+                            for mod in root.search-results : Rectangle {
+                                background: #1c1c1c;
+                                border-color: #333333;
+                                border-width: 1px;
+
                                 VerticalLayout {
-                                    alignment: center;
-                                    spacing: 3px;
-                                    horizontal-stretch: 1;
-                                    
+                                    padding: 10px;
+                                    spacing: 8px;
+
+                                    // Main Mod Card Row
                                     HorizontalLayout {
-                                        spacing: 8px;
-                                        Text {
-                                            text: mod.title;
-                                            font-size: 13px;
-                                            font-weight: 700;
-                                            color: McTheme.text-primary;
+                                        spacing: 12px;
+                                        alignment: space-between;
+
+                                        // Left: 44x44 Mod Icon
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Rectangle {
+                                                width: 44px;
+                                                height: 44px;
+                                                background: #111111;
+                                                border-color: #000000;
+                                                border-width: 1px;
+                                                clip: true;
+
+                                                if mod.has-icon : Image {
+                                                    width: 100%;
+                                                    height: 100%;
+                                                    source: mod.icon;
+                                                    image-fit: cover;
+                                                }
+
+                                                if !mod.has-icon : Text {
+                                                    width: 100%;
+                                                    height: 100%;
+                                                    text: mod.project-type == "resourcepack" ? "RP" :
+                                                          (mod.project-type == "shader" ? "SH" : "MOD");
+                                                    font-size: 10px;
+                                                    font-weight: 700;
+                                                    color: #666666;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
                                         }
-                                        Text {
-                                            text: "by " + mod.author + " • " + (mod.downloads / 1000) + "k downloads";
-                                            font-size: 10px;
-                                            color: #888888;
-                                            vertical-alignment: center;
+
+                                        // Middle: Title + Author + Description + Installed Badge
+                                        VerticalLayout {
+                                            alignment: center;
+                                            spacing: 4px;
+                                            horizontal-stretch: 1;
+                                            min-width: 0px;
+
+                                            HorizontalLayout {
+                                                spacing: 8px;
+                                                alignment: start;
+
+                                                Text {
+                                                    text: mod.title;
+                                                    font-size: 13px;
+                                                    font-weight: 700;
+                                                    color: #ffffff;
+                                                    overflow: elide;
+                                                }
+
+                                                Text {
+                                                    text: "by " + mod.author;
+                                                    font-size: 11px;
+                                                    color: #888888;
+                                                    vertical-alignment: center;
+                                                }
+
+                                                if mod.is-installed : Rectangle {
+                                                    height: 18px;
+                                                    background: #1b5e20;
+                                                    border-color: #4caf50;
+                                                    border-width: 1px;
+
+                                                    HorizontalLayout {
+                                                        padding-left: 6px;
+                                                        padding-right: 6px;
+                                                        alignment: center;
+                                                        Text {
+                                                            text: mod.installed-version != "" ? ("✓ INSTALLED v" + mod.installed-version) : "✓ INSTALLED";
+                                                            font-size: 9px;
+                                                            font-weight: 700;
+                                                            color: #a5d6a7;
+                                                            vertical-alignment: center;
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            Text {
+                                                text: mod.description;
+                                                font-size: 11px;
+                                                color: #bdbdbd;
+                                                overflow: elide;
+                                            }
+                                        }
+
+                                        // Right Column 1: Downloads Counter (Always Aligned to Right)
+                                        VerticalLayout {
+                                            alignment: center;
+                                            min-width: 80px;
+
+                                            HorizontalLayout {
+                                                alignment: end;
+                                                Text {
+                                                    text: "↓ " + mod.downloads;
+                                                    font-size: 11px;
+                                                    font-weight: 700;
+                                                    color: #66bb6a;
+                                                    horizontal-alignment: right;
+                                                }
+                                            }
+
+                                            Text {
+                                                text: "downloads";
+                                                font-size: 9px;
+                                                color: #777777;
+                                                horizontal-alignment: right;
+                                            }
+                                        }
+
+                                        // Right Column 2: Split Install / Switch Version Button
+                                        VerticalLayout {
+                                            alignment: center;
+                                            HorizontalLayout {
+                                                spacing: 1px;
+
+                                                McButton {
+                                                    text: mod.installing ? "INSTALLING..." :
+                                                          (mod.is-installed ? "SWITCH VERSION" : "+ INSTALL");
+                                                    primary: !mod.is-installed;
+                                                    gold: mod.is-installed;
+                                                    disabled: mod.installing;
+                                                    font-size: 11px;
+                                                    h-padding: 12px;
+                                                    v-padding: 7px;
+                                                    clicked => {
+                                                        if mod.is-installed {
+                                                            root.toggle-versions-clicked(mod.project-id);
+                                                        } else {
+                                                            root.install-mod-clicked(mod.project-id, "");
+                                                        }
+                                                    }
+                                                }
+
+                                                McButton {
+                                                    text: root.expanded-project-id == mod.project-id ? "▲" : "▼";
+                                                    primary: !mod.is-installed;
+                                                    gold: mod.is-installed;
+                                                    font-size: 10px;
+                                                    h-padding: 7px;
+                                                    v-padding: 7px;
+                                                    clicked => { root.toggle-versions-clicked(mod.project-id); }
+                                                }
+                                            }
                                         }
                                     }
-                                    
-                                    Text {
-                                        text: mod.description;
-                                        font-size: 11px;
-                                        color: McTheme.text-secondary;
-                                        overflow: elide;
+
+                                    // Expandable Version Picker Drawer
+                                    if root.expanded-project-id == mod.project-id : Rectangle {
+                                        background: #121212;
+                                        border-color: #2b2b2b;
+                                        border-width: 1px;
+
+                                        VerticalLayout {
+                                            padding: 8px;
+                                            spacing: 6px;
+
+                                            Text {
+                                                text: "Select Version for " + mod.title + " (Filter: MC " + root.filter-mc-version + " / " + root.filter-loader + "):";
+                                                font-size: 10px;
+                                                font-weight: 700;
+                                                color: #aaaaaa;
+                                            }
+
+                                            if root.loading-versions : Text {
+                                                text: "Loading versions from Modrinth...";
+                                                font-size: 11px;
+                                                color: #888888;
+                                                horizontal-alignment: center;
+                                            }
+
+                                            if !root.loading-versions && root.expanded-project-versions.length == 0 : Text {
+                                                text: "No versions matched filter. Try setting MC Version filter to 'ALL' above.";
+                                                font-size: 11px;
+                                                color: #888888;
+                                                horizontal-alignment: center;
+                                            }
+
+                                            for ver in root.expanded-project-versions : Rectangle {
+                                                background: #181818;
+                                                border-color: #2c2c2c;
+                                                border-width: 1px;
+                                                height: 42px;
+
+                                                HorizontalLayout {
+                                                    padding-left: 8px;
+                                                    padding-right: 8px;
+                                                    spacing: 8px;
+                                                    alignment: space-between;
+
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        spacing: 2px;
+                                                        horizontal-stretch: 1;
+
+                                                        Text {
+                                                            text: ver.version-number + " (" + ver.name + ")";
+                                                            font-size: 11px;
+                                                            font-weight: 700;
+                                                            color: #ffffff;
+                                                            overflow: elide;
+                                                        }
+
+                                                        Text {
+                                                            text: "MC: " + ver.game-versions + " • " + ver.loaders + " • " + ver.date-published;
+                                                            font-size: 10px;
+                                                            color: #888888;
+                                                            overflow: elide;
+                                                        }
+                                                    }
+
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        McButton {
+                                                            text: ver.installing ? "..." : ("INSTALL v" + ver.version-number);
+                                                            disabled: ver.installing;
+                                                            font-size: 10px;
+                                                            h-padding: 10px;
+                                                            v-padding: 5px;
+                                                            clicked => { root.install-mod-clicked(mod.project-id, ver.id); }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
-                                }
-                                
-                                McButton {
-                                    text: mod.installed ? "INSTALLED" : "+ INSTALL";
-                                    primary: !mod.installed;
-                                    disabled: mod.installed;
-                                    font-size: 10px;
-                                    v-padding: 6px;
-                                    h-padding: 10px;
-                                    clicked => { root.install-mod-clicked(mod.project-id); }
                                 }
                             }
                         }
                     }
                 }
             }
-            
-            // Tab 1: Installed Mods
+
+            // =========================================================
+            // TAB 1: INSTALLED MODS (GROUPED & COLLAPSIBLE)
+            // =========================================================
             if root.active-tab == 1 : VerticalLayout {
-                spacing: 10px;
                 vertical-stretch: 1;
-                
-                Rectangle {
-                    background: #0f0f0f;
-                    border-color: #262626;
-                    border-width: 1px;
-                    vertical-stretch: 1;
-                    
-                    if root.installed-mods.length == 0 : Text {
-                        text: "No mods currently installed in instance mods/ folder";
-                        color: #666666;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                spacing: 8px;
+
+                // Filename Filter + Group Counter Bar
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: space-between;
+
+                    McTextInput {
+                        horizontal-stretch: 1;
+                        box-height: 30px;
+                        text <=> root.installed-filter;
+                        placeholder: "Filter installed content by name...";
+                        edited(f) => { root.installed-filter-edited(f); }
                     }
-                    
-                    ListView {
-                        for mod in root.installed-mods : Rectangle {
-                            height: 48px;
-                            
+
+                    VerticalLayout {
+                        alignment: center;
+                        Text {
+                            text: root.user-mods.length + " User • " + root.pack-mods.length + " Modpack";
+                            font-size: 11px;
+                            color: #999999;
+                        }
+                    }
+                }
+
+                // Category Filter Bar
+                HorizontalLayout {
+                    spacing: 6px;
+                    height: 26px;
+
+                    McButton {
+                        text: "ALL";
+                        font-size: 10px;
+                        primary: root.installed-category == "all";
+                        h-padding: 10px;
+                        v-padding: 4px;
+                        clicked => {
+                            root.installed-category = "all";
+                            root.installed-category-selected("all");
+                        }
+                    }
+                    McButton {
+                        text: "MODS";
+                        font-size: 10px;
+                        primary: root.installed-category == "mods";
+                        h-padding: 10px;
+                        v-padding: 4px;
+                        clicked => {
+                            root.installed-category = "mods";
+                            root.installed-category-selected("mods");
+                        }
+                    }
+                    McButton {
+                        text: "RESOURCE PACKS";
+                        font-size: 10px;
+                        primary: root.installed-category == "resourcepacks";
+                        h-padding: 10px;
+                        v-padding: 4px;
+                        clicked => {
+                            root.installed-category = "resourcepacks";
+                            root.installed-category-selected("resourcepacks");
+                        }
+                    }
+                    McButton {
+                        text: "SHADERS";
+                        font-size: 10px;
+                        primary: root.installed-category == "shaderpacks";
+                        h-padding: 10px;
+                        v-padding: 4px;
+                        clicked => {
+                            root.installed-category = "shaderpacks";
+                            root.installed-category-selected("shaderpacks");
+                        }
+                    }
+                    McButton {
+                        text: "DATAPACKS";
+                        font-size: 10px;
+                        primary: root.installed-category == "datapacks";
+                        h-padding: 10px;
+                        v-padding: 4px;
+                        clicked => {
+                            root.installed-category = "datapacks";
+                            root.installed-category-selected("datapacks");
+                        }
+                    }
+                }
+
+                // Grouped Scrollable List
+                Rectangle {
+                    vertical-stretch: 1;
+                    background: McTheme.inset-bg;
+                    border-color: McTheme.inset-border;
+                    border-width: 1px;
+                    clip: true;
+
+                    ScrollView {
+                        width: 100%;
+                        height: 100%;
+
+                        VerticalLayout {
+                            padding: 10px;
+                            spacing: 12px;
+                            alignment: start;
+
+                            // GROUP 1: USER ADDED MODS
                             Rectangle {
-                                y: parent.height - 1px;
-                                height: 1px;
-                                background: #222222;
-                            }
-                            
-                            HorizontalLayout {
-                                padding-left: 12px;
-                                padding-right: 12px;
-                                spacing: 12px;
-                                alignment: space-between;
-                                
-                                HorizontalLayout {
-                                    spacing: 8px;
-                                    alignment: start;
-                                    
-                                    Text {
-                                        text: mod.display-name;
-                                        font-size: 12px;
-                                        font-weight: 700;
-                                        color: mod.is-disabled ? #666666 : McTheme.text-primary;
-                                        vertical-alignment: center;
+                                background: #141c14;
+                                border-color: #2e5730;
+                                border-width: 1px;
+
+                                VerticalLayout {
+                                    // Group 1 Collapse Header
+                                    Rectangle {
+                                        height: 32px;
+                                        background: user-grp-touch.has-hover ? #223d24 : #1b301c;
+
+                                        user-grp-touch := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.user-mods-collapsed = !root.user-mods-collapsed; }
+                                        }
+
+                                        HorizontalLayout {
+                                            padding-left: 12px;
+                                            padding-right: 12px;
+                                            alignment: space-between;
+
+                                            VerticalLayout {
+                                                alignment: center;
+                                                Text {
+                                                    text: "USER ADDED (" + root.user-mods.length + ")";
+                                                    font-size: 11px;
+                                                    font-weight: 700;
+                                                    color: #a5d6a7;
+                                                }
+                                            }
+
+                                            VerticalLayout {
+                                                alignment: center;
+                                                Text {
+                                                    text: root.user-mods-collapsed ? "▶ EXPAND" : "▼ COLLAPSE";
+                                                    font-size: 10px;
+                                                    font-weight: 700;
+                                                    color: #a5d6a7;
+                                                }
+                                            }
+                                        }
                                     }
-                                    
-                                    if mod.is-user-added : Rectangle {
-                                        background: #1565c0;
-                                        border-radius: 2px;
-                                        height: 16px;
-                                        width: 75px;
-                                        y: (parent.height - self.height) / 2;
-                                        Text {
-                                            text: "USER ADDED";
-                                            font-size: 8px;
-                                            font-weight: 700;
-                                            color: #ffffff;
+
+                                    if !root.user-mods-collapsed : VerticalLayout {
+                                        padding: 8px;
+                                        spacing: 6px;
+
+                                        if root.user-mods.length == 0 : Text {
+                                            height: 36px;
+                                            text: "No custom user-installed content found in this category.";
+                                            font-size: 11px;
+                                            color: #777777;
                                             horizontal-alignment: center;
                                             vertical-alignment: center;
                                         }
-                                    }
-                                    
-                                    if !mod.is-user-added : Rectangle {
-                                        background: #2e7d32;
-                                        border-radius: 2px;
-                                        height: 16px;
-                                        width: 65px;
-                                        y: (parent.height - self.height) / 2;
-                                        Text {
-                                            text: "MODPACK";
-                                            font-size: 8px;
-                                            font-weight: 700;
-                                            color: #ffffff;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
+
+                                        for mod in root.user-mods : Rectangle {
+                                            height: 52px;
+                                            background: #1c1c1c;
+                                            border-color: #333333;
+                                            border-width: 1px;
+
+                                            HorizontalLayout {
+                                                padding-left: 10px;
+                                                padding-right: 10px;
+                                                spacing: 10px;
+                                                alignment: space-between;
+
+                                                // Icon
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    if mod.has-icon : Image {
+                                                        width: 32px;
+                                                        height: 32px;
+                                                        source: mod.icon;
+                                                        image-fit: contain;
+                                                    }
+                                                    if !mod.has-icon : Rectangle {
+                                                        width: 32px;
+                                                        height: 32px;
+                                                        background: #252525;
+                                                        border-color: #3a3a3a;
+                                                        border-width: 1px;
+                                                        Text {
+                                                            width: 100%;
+                                                            height: 100%;
+                                                            text: mod.category == "resourcepacks" ? "🎨" : (mod.category == "shaderpacks" ? "✨" : (mod.category == "datapacks" ? "📦" : "🧩"));
+                                                            font-size: 16px;
+                                                            horizontal-alignment: center;
+                                                            vertical-alignment: center;
+                                                        }
+                                                    }
+                                                }
+
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    spacing: 2px;
+                                                    horizontal-stretch: 1;
+
+                                                    HorizontalLayout {
+                                                        spacing: 8px;
+                                                        alignment: start;
+
+                                                        Text {
+                                                            text: mod.filename;
+                                                            font-size: 12px;
+                                                            font-weight: 700;
+                                                            color: mod.enabled ? #ffffff : #777777;
+                                                            overflow: elide;
+                                                        }
+
+                                                        if mod.category != "mods" : Rectangle {
+                                                            height: 16px;
+                                                            background: #1e3a5f;
+                                                            border-color: #2b5c8f;
+                                                            border-width: 1px;
+                                                            Text {
+                                                                text: " " + (mod.category == "resourcepacks" ? "RESOURCE PACK" : (mod.category == "shaderpacks" ? "SHADER" : "DATAPACK")) + " ";
+                                                                font-size: 8px;
+                                                                font-weight: 700;
+                                                                color: #90caf9;
+                                                                horizontal-alignment: center;
+                                                                vertical-alignment: center;
+                                                            }
+                                                        }
+
+                                                        Rectangle {
+                                                            width: 74px;
+                                                            height: 16px;
+                                                            background: #1b5e20;
+                                                            border-color: #388e3c;
+                                                            border-width: 1px;
+
+                                                            Text {
+                                                                width: 100%;
+                                                                height: 100%;
+                                                                text: "USER ADDED";
+                                                                font-size: 9px;
+                                                                font-weight: 700;
+                                                                color: #a5d6a7;
+                                                                horizontal-alignment: center;
+                                                                vertical-alignment: center;
+                                                            }
+                                                        }
+                                                    }
+
+                                                    Text {
+                                                        text: mod.size-kb + " KB";
+                                                        font-size: 10px;
+                                                        color: #888888;
+                                                    }
+                                                }
+
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    HorizontalLayout {
+                                                        spacing: 6px;
+
+                                                        McButton {
+                                                            text: mod.enabled ? "DISABLE" : "ENABLE";
+                                                            font-size: 10px;
+                                                            h-padding: 10px;
+                                                            v-padding: 5px;
+                                                            clicked => { root.toggle-mod-clicked(mod.filename); }
+                                                        }
+
+                                                        McButton {
+                                                            text: "DELETE";
+                                                            danger: true;
+                                                            font-size: 10px;
+                                                            h-padding: 10px;
+                                                            v-padding: 5px;
+                                                            clicked => { root.delete-mod-clicked(mod.filename); }
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
-                                
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    alignment: end;
-                                    
-                                    McButton {
-                                        text: mod.is-disabled ? "ENABLE" : "DISABLE";
-                                        font-size: 9px;
-                                        v-padding: 4px;
-                                        h-padding: 8px;
-                                        clicked => { root.toggle-mod-clicked(mod.filename); }
+                            }
+
+                            // SEPARATOR LINE
+                            Rectangle {
+                                height: 2px;
+                                background: #2a2a2a;
+                            }
+
+                            // GROUP 2: MODPACK MODS
+                            Rectangle {
+                                background: #13181b;
+                                border-color: #2d3e46;
+                                border-width: 1px;
+
+                                VerticalLayout {
+                                    // Group 2 Collapse Header
+                                    // Group 2 Collapse Header
+                                    Rectangle {
+                                        height: 32px;
+                                        background: pack-grp-touch.has-hover ? #24343c : #1c282e;
+
+                                        pack-grp-touch := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.pack-mods-collapsed = !root.pack-mods-collapsed; }
+                                        }
+
+                                        HorizontalLayout {
+                                            padding-left: 12px;
+                                            padding-right: 12px;
+                                            alignment: space-between;
+
+                                            VerticalLayout {
+                                                alignment: center;
+                                                Text {
+                                                    text: "MODPACK MODS (" + root.pack-mods.length + ")";
+                                                    font-size: 11px;
+                                                    font-weight: 700;
+                                                    color: #90caf9;
+                                                }
+                                            }
+
+                                            VerticalLayout {
+                                                alignment: center;
+                                                Text {
+                                                    text: root.pack-mods-collapsed ? "▶ EXPAND" : "▼ COLLAPSE";
+                                                    font-size: 10px;
+                                                    font-weight: 700;
+                                                    color: #90caf9;
+                                                }
+                                            }
+                                        }
                                     }
-                                    
-                                    McButton {
-                                        text: "DELETE";
-                                        danger: true;
-                                        font-size: 9px;
-                                        v-padding: 4px;
-                                        h-padding: 8px;
-                                        clicked => { root.delete-mod-clicked(mod.filename); }
+
+                                    if !root.pack-mods-collapsed : VerticalLayout {
+                                        padding: 8px;
+                                        spacing: 6px;
+
+                                        if root.pack-mods.length == 0 : Text {
+                                            height: 36px;
+                                            text: "No modpack-managed mods in folder yet.";
+                                            font-size: 11px;
+                                            color: #777777;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+
+                                        for mod in root.pack-mods : Rectangle {
+                                            height: 52px;
+                                            background: #1c1c1c;
+                                            border-color: #333333;
+                                            border-width: 1px;
+
+                                            HorizontalLayout {
+                                                padding-left: 10px;
+                                                padding-right: 10px;
+                                                spacing: 10px;
+                                                alignment: space-between;
+
+                                                // Icon
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    if mod.has-icon : Image {
+                                                        width: 32px;
+                                                        height: 32px;
+                                                        source: mod.icon;
+                                                        image-fit: contain;
+                                                    }
+                                                    if !mod.has-icon : Rectangle {
+                                                        width: 32px;
+                                                        height: 32px;
+                                                        background: #252525;
+                                                        border-color: #3a3a3a;
+                                                        border-width: 1px;
+                                                        Text {
+                                                            width: 100%;
+                                                            height: 100%;
+                                                            text: mod.category == "resourcepacks" ? "🎨" : (mod.category == "shaderpacks" ? "✨" : (mod.category == "datapacks" ? "📦" : "🧩"));
+                                                            font-size: 16px;
+                                                            horizontal-alignment: center;
+                                                            vertical-alignment: center;
+                                                        }
+                                                    }
+                                                }
+
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    spacing: 2px;
+                                                    horizontal-stretch: 1;
+
+                                                    HorizontalLayout {
+                                                        spacing: 8px;
+                                                        alignment: start;
+
+                                                        Text {
+                                                            text: mod.filename;
+                                                            font-size: 12px;
+                                                            font-weight: 700;
+                                                            color: mod.enabled ? #ffffff : #777777;
+                                                            overflow: elide;
+                                                        }
+
+                                                        if mod.category != "mods" : Rectangle {
+                                                            height: 16px;
+                                                            background: #1e3a5f;
+                                                            border-color: #2b5c8f;
+                                                            border-width: 1px;
+                                                            Text {
+                                                                text: " " + (mod.category == "resourcepacks" ? "RESOURCE PACK" : (mod.category == "shaderpacks" ? "SHADER" : "DATAPACK")) + " ";
+                                                                font-size: 8px;
+                                                                font-weight: 700;
+                                                                color: #90caf9;
+                                                                horizontal-alignment: center;
+                                                                vertical-alignment: center;
+                                                            }
+                                                        }
+
+                                                        Rectangle {
+                                                            width: 66px;
+                                                            height: 16px;
+                                                            background: #263238;
+                                                            border-color: #37474f;
+                                                            border-width: 1px;
+
+                                                            Text {
+                                                                width: 100%;
+                                                                height: 100%;
+                                                                text: "MODPACK";
+                                                                font-size: 9px;
+                                                                font-weight: 700;
+                                                                color: #90caf9;
+                                                                horizontal-alignment: center;
+                                                                vertical-alignment: center;
+                                                            }
+                                                        }
+                                                    }
+
+                                                    Text {
+                                                        text: mod.size-kb + " KB";
+                                                        font-size: 10px;
+                                                        color: #888888;
+                                                    }
+                                                }
+
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    HorizontalLayout {
+                                                        spacing: 6px;
+
+                                                        McButton {
+                                                            text: mod.enabled ? "DISABLE" : "ENABLE";
+                                                            font-size: 10px;
+                                                            h-padding: 10px;
+                                                            v-padding: 5px;
+                                                            clicked => { root.toggle-mod-clicked(mod.filename); }
+                                                        }
+
+                                                        McButton {
+                                                            text: "DELETE";
+                                                            danger: true;
+                                                            font-size: 10px;
+                                                            h-padding: 10px;
+                                                            v-padding: 5px;
+                                                            clicked => { root.delete-mod-clicked(mod.filename); }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
                     }
+                }
+            }
+
+            // Bottom Footer Close Button
+            HorizontalLayout {
+                alignment: end;
+                McButton {
+                    text: "CLOSE";
+                    font-size: 11px;
+                    h-padding: 16px;
+                    v-padding: 6px;
+                    clicked => { root.close-clicked(); }
                 }
             }
         }

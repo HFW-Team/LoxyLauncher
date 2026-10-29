@@ -1,15 +1,20 @@
 export struct ServerStatusData {
     online: bool,
+    host: string,
+    port: int,
     motd: string,
     players-online: int,
     players-max: int,
     latency-ms: int,
+    has-latency: bool,
 }
 
 export struct AccountData {
     logged-in: bool,
     username: string,
     uuid: string,
+    avatar: image,
+    has-avatar: bool,
 }
 
 export struct ModpackData {
@@ -21,6 +26,9 @@ export struct ModpackData {
     server-host: string,
     server-port: int,
     update-available: bool,
+    is-offline-fallback: bool,
+    is-mrpack: bool,
+    news: string,
 }
 
 export struct ConfigData {
@@ -28,16 +36,27 @@ export struct ConfigData {
     shared-dir: string,
     min-ram-mb: int,
     max-ram-mb: int,
+    recommended-ram-mb: int,
+    total-system-ram-mb: int,
     jvm-args: string,
     java-path: string,
-    resolution-width: int,
-    resolution-height: int,
+    resolution-width: string,
+    resolution-height: string,
     fullscreen: bool,
     close-behavior: int, // 0 = HideAndReopen, 1 = KeepOpen, 2 = CloseLauncher
     discord-rpc: bool,
     keep-user-mods: bool,
+    manifest-url: string,
+    server-host: string,
+    server-port: string,
     azure-client-id: string,
-    total-system-ram-mb: int,
+}
+
+export struct DetectedJavaData {
+    path: string,
+    major: int,
+    version-string: string,
+    label: string,
 }
 
 export struct ProgressData {
@@ -55,26 +74,48 @@ export struct LogEntryData {
     line: string,
 }
 
+export struct StoredAccountData {
+    uuid: string,
+    username: string,
+    is-active: bool,
+    avatar: image,
+    has-avatar: bool,
+}
+
 export struct ModHitData {
     project-id: string,
+    project-type: string,
     slug: string,
     title: string,
     description: string,
     author: string,
-    downloads: int,
-    installed: bool,
+    downloads: string,
+    icon: image,
+    has-icon: bool,
+    installing: bool,
+    versions-expanded: bool,
+    is-installed: bool,
+    installed-version: string,
+    installed-filename: string,
 }
 
 export struct ModVersionData {
     id: string,
+    project-id: string,
+    name: string,
     version-number: string,
     game-versions: string,
     loaders: string,
+    date-published: string,
+    installing: bool,
 }
 
 export struct InstalledModData {
     filename: string,
-    display-name: string,
-    is-disabled: bool,
-    is-user-added: bool,
+    size-kb: int,
+    enabled: bool,
+    is-user-mod: bool,
+    category: string,
+    icon: image,
+    has-icon: bool,
 }

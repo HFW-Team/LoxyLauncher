@@ -186,6 +186,8 @@ struct ModrinthApiVersionFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModrinthSearchHit {
     pub project_id: String,
+    #[serde(default)]
+    pub project_type: Option<String>,
     pub slug: String,
     pub title: String,
     pub author: String,
@@ -207,6 +209,12 @@ pub struct InstalledModEntry {
     pub enabled: bool,
     pub is_user_mod: bool,
     pub size_kb: u64,
+    #[serde(default = "default_category")]
+    pub category: String,
+}
+
+fn default_category() -> String {
+    "mods".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -391,15 +399,17 @@ async fn resolve_modrinth_project_manifest(
     })
 }
 
-/// Searches Modrinth's official v2 `/search` endpoint for mods with optional version, loader, and sort filters.
+/// Searches Modrinth's official v2 `/search` endpoint for content with optional type, version, loader, and sort filters.
 pub async fn search_modrinth_mods(
     client: &Client,
     query: &str,
+    project_type: Option<&str>,
     mc_version: Option<&str>,
     loader: Option<&str>,
     sort_index: Option<&str>,
 ) -> Result<Vec<ModrinthSearchHit>> {
-    let mut facet_groups = vec!["[\"project_type:mod\"]".to_string()];
+    let ptype = project_type.unwrap_or("mod");
+    let mut facet_groups = vec![format!("[\"project_type:{}\"]", ptype)];
 
     if let Some(ver) = mc_version {
         let v = ver.trim();
@@ -408,10 +418,12 @@ pub async fn search_modrinth_mods(
         }
     }
 
-    if let Some(ldr) = loader {
-        let l = ldr.trim().to_lowercase();
-        if !l.is_empty() && l != "all" && l != "any" && l != "vanilla" {
-            facet_groups.push(format!("[\"categories:{}\"]", l));
+    if ptype == "mod" {
+        if let Some(ldr) = loader {
+            let l = ldr.trim().to_lowercase();
+            if !l.is_empty() && l != "all" && l != "any" && l != "vanilla" {
+                facet_groups.push(format!("[\"categories:{}\"]", l));
+            }
         }
     }
 
@@ -508,11 +520,77 @@ pub async fn get_modrinth_mod_versions(
     Ok(items)
 }
 
-/// Installs a mod from Modrinth (`GET /v2/project/{id}/version`) directly into `<instance_dir>/mods/`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstalledModrinthProject {
+    pub project_id: String,
+    pub filename: String,
+    pub version_id: String,
+    pub version_number: String,
+    pub project_type: String,
+}
+
+pub fn get_installed_modrinth_projects(instance_dir: &Path) -> HashMap<String, InstalledModrinthProject> {
+    let registry_file = instance_dir.join(".modrinth-installed.json");
+    fs::read_to_string(&registry_file)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Attempts to extract an icon preview from a `.jar` or `.zip` content file.
+/// Looks for `pack.png`, `icon.png`, or `assets/<modid>/icon.png`.
+pub fn extract_icon_from_archive(file_path: &Path) -> Option<Vec<u8>> {
+    let file = fs::File::open(file_path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+
+    if let Ok(mut zf) = archive.by_name("pack.png") {
+        let mut buf = Vec::new();
+        if std::io::Read::read_to_end(&mut zf, &mut buf).is_ok() && !buf.is_empty() {
+            return Some(buf);
+        }
+    }
+    if let Ok(mut zf) = archive.by_name("icon.png") {
+        let mut buf = Vec::new();
+        if std::io::Read::read_to_end(&mut zf, &mut buf).is_ok() && !buf.is_empty() {
+            return Some(buf);
+        }
+    }
+
+    let len = archive.len();
+    for i in 0..len {
+        let match_name = {
+            if let Ok(zf) = archive.by_index(i) {
+                let name = zf.name().to_string();
+                if (name.starts_with("assets/") || name.starts_with("META-INF/")) && name.ends_with("/icon.png") {
+                    Some(name)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        if let Some(name) = match_name {
+            if let Ok(mut zf) = archive.by_name(&name) {
+                let mut buf = Vec::new();
+                if std::io::Read::read_to_end(&mut zf, &mut buf).is_ok() && !buf.is_empty() {
+                    return Some(buf);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Installs a mod or other content from Modrinth directly into `<instance_dir>/mods/`, `resourcepacks/`, `shaderpacks/`, or `datapacks/`.
 /// If `version_id` is specified, installs that exact version; otherwise selects the latest matching version.
+/// Automatically replaces/removes any previously installed version of the same project.
 pub async fn install_modrinth_mod(
     client: &Client,
     project_id: &str,
+    project_type: Option<&str>,
     version_id: Option<&str>,
     mc_version: &str,
     loader: &str,
@@ -525,7 +603,7 @@ pub async fn install_modrinth_mod(
         .get(&ver_url)
         .send()
         .await
-        .with_context(|| format!("Failed to fetch versions for Modrinth mod {}", project_id))?;
+        .with_context(|| format!("Failed to fetch versions for Modrinth project {}", project_id))?;
 
     if !resp.status().is_success() {
         bail!(
@@ -536,6 +614,9 @@ pub async fn install_modrinth_mod(
 
     let versions: Vec<ModrinthApiVersion> = resp.json().await?;
 
+    let ptype = project_type.unwrap_or("mod");
+    let is_mod = ptype == "mod";
+
     let matched = if let Some(target_vid) = version_id.filter(|s| !s.trim().is_empty()) {
         versions
             .iter()
@@ -543,8 +624,11 @@ pub async fn install_modrinth_mod(
             .ok_or_else(|| anyhow!("Requested version {} not found on Modrinth", target_vid))?
     } else {
         let check_ver = !mc_version.trim().is_empty() && !mc_version.eq_ignore_ascii_case("all");
-        let check_ldr =
-            !loader_name.is_empty() && loader_name != "all" && loader_name != "any" && loader_name != "vanilla";
+        let check_ldr = is_mod
+            && !loader_name.is_empty()
+            && loader_name != "all"
+            && loader_name != "any"
+            && loader_name != "vanilla";
 
         versions
             .iter()
@@ -567,39 +651,87 @@ pub async fn install_modrinth_mod(
             })?
     };
 
-    let jar_file = matched
-        .files
-        .iter()
-        .find(|f| f.filename.ends_with(".jar") && f.primary == Some(true))
-        .or_else(|| matched.files.iter().find(|f| f.filename.ends_with(".jar")))
-        .ok_or_else(|| anyhow!("No .jar file found in Modrinth release {}", matched.version_number))?;
+    let target_file = if is_mod {
+        matched
+            .files
+            .iter()
+            .find(|f| f.filename.ends_with(".jar") && f.primary == Some(true))
+            .or_else(|| matched.files.iter().find(|f| f.filename.ends_with(".jar")))
+            .or_else(|| matched.files.first())
+            .ok_or_else(|| anyhow!("No .jar file found in Modrinth release {}", matched.version_number))?
+    } else {
+        matched
+            .files
+            .iter()
+            .find(|f| (f.filename.ends_with(".zip") || f.filename.ends_with(".jar")) && f.primary == Some(true))
+            .or_else(|| matched.files.iter().find(|f| f.filename.ends_with(".zip") || f.filename.ends_with(".jar")))
+            .or_else(|| matched.files.first())
+            .ok_or_else(|| anyhow!("No download files found in Modrinth release {}", matched.version_number))?
+    };
 
-    let mods_dir = instance_dir.join("mods");
-    fs::create_dir_all(&mods_dir)?;
+    let category = match ptype {
+        "resourcepack" => "resourcepacks",
+        "shader" => "shaderpacks",
+        "datapack" => "datapacks",
+        _ => "mods",
+    };
+    let dest_dir = instance_dir.join(category);
+    fs::create_dir_all(&dest_dir)?;
 
-    let safe_fname = sanitize_relative_path(&jar_file.filename)?;
-    let dest_path = mods_dir.join(&safe_fname);
+    // 1. Remove previous installed file for this project if upgrading/switching versions
+    let registry_file = instance_dir.join(".modrinth-installed.json");
+    let mut installed_map: HashMap<String, InstalledModrinthProject> = fs::read_to_string(&registry_file)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
 
-    let sha1 = jar_file
+    if let Some(prev) = installed_map.get(project_id) {
+        if prev.filename != target_file.filename {
+            let prev_path = dest_dir.join(&prev.filename);
+            let _ = fs::remove_file(prev_path);
+            let prev_disabled = dest_dir.join(format!("{}.disabled", prev.filename));
+            let _ = fs::remove_file(prev_disabled);
+        }
+    }
+
+    let safe_fname = sanitize_relative_path(&target_file.filename)?;
+    let dest_path = dest_dir.join(&safe_fname);
+
+    let sha1 = target_file
         .hashes
         .as_ref()
         .and_then(|h| h.sha1.as_deref());
-    let sha512 = jar_file
+    let sha512 = target_file
         .hashes
         .as_ref()
         .and_then(|h| h.sha512.as_deref());
 
-    download_and_verify_file(client, &jar_file.url, &dest_path, sha1, None, sha512).await?;
+    download_and_verify_file(client, &target_file.url, &dest_path, sha1, None, sha512).await?;
 
-    // Record in `.user-mods.json` so we know this mod was explicitly added by the user
+    // Record in `.user-mods.json`
     let user_mods_file = instance_dir.join(".user-mods.json");
     let mut user_mods: HashSet<String> = fs::read_to_string(&user_mods_file)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
-    user_mods.insert(jar_file.filename.clone());
+    user_mods.insert(target_file.filename.clone());
     if let Ok(serialized) = serde_json::to_string_pretty(&user_mods) {
         let _ = fs::write(&user_mods_file, serialized);
+    }
+
+    // Record in `.modrinth-installed.json`
+    installed_map.insert(
+        project_id.to_string(),
+        InstalledModrinthProject {
+            project_id: project_id.to_string(),
+            filename: target_file.filename.clone(),
+            version_id: matched.id.clone(),
+            version_number: matched.version_number.clone(),
+            project_type: ptype.to_string(),
+        },
+    );
+    if let Ok(serialized) = serde_json::to_string_pretty(&installed_map) {
+        let _ = fs::write(&registry_file, serialized);
     }
 
     let size_kb = fs::metadata(&dest_path)
@@ -607,19 +739,15 @@ pub async fn install_modrinth_mod(
         .unwrap_or(0);
 
     Ok(InstalledModEntry {
-        filename: jar_file.filename.clone(),
+        filename: target_file.filename.clone(),
         enabled: true,
         is_user_mod: true,
         size_kb,
+        category: category.to_string(),
     })
 }
 
 pub fn list_installed_mods(instance_dir: &Path) -> Result<Vec<InstalledModEntry>> {
-    let mods_dir = instance_dir.join("mods");
-    if !mods_dir.exists() {
-        return Ok(Vec::new());
-    }
-
     let user_mods_file = instance_dir.join(".user-mods.json");
     let user_mods: HashSet<String> = fs::read_to_string(&user_mods_file)
         .ok()
@@ -633,26 +761,48 @@ pub fn list_installed_mods(instance_dir: &Path) -> Result<Vec<InstalledModEntry>
         .unwrap_or_default();
 
     let mut list = Vec::new();
-    for entry in fs::read_dir(&mods_dir)?.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let fname = entry.file_name().to_string_lossy().to_string();
-        if !fname.ends_with(".jar") && !fname.ends_with(".jar.disabled") {
-            continue;
-        }
-        let enabled = fname.ends_with(".jar");
-        let base_jar_name = fname.trim_end_matches(".disabled");
-        let is_user_mod = user_mods.contains(base_jar_name) || !manifest_mods.contains(base_jar_name);
-        let size_kb = entry.metadata().map(|m| m.len() / 1024).unwrap_or(0);
 
-        list.push(InstalledModEntry {
-            filename: fname,
-            enabled,
-            is_user_mod,
-            size_kb,
-        });
+    let scan_dirs: [(&str, &[&str]); 4] = [
+        ("mods", &["jar"]),
+        ("resourcepacks", &["zip"]),
+        ("shaderpacks", &["zip"]),
+        ("datapacks", &["zip"]),
+    ];
+
+    for (cat, exts) in scan_dirs {
+        let dir = instance_dir.join(cat);
+        if !dir.exists() {
+            continue;
+        }
+        for entry in fs::read_dir(&dir)?.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let fname = entry.file_name().to_string_lossy().to_string();
+            let mut matches_ext = false;
+            for ext in exts {
+                if fname.ends_with(&format!(".{}", ext)) || fname.ends_with(&format!(".{}.disabled", ext)) {
+                    matches_ext = true;
+                    break;
+                }
+            }
+            if !matches_ext {
+                continue;
+            }
+            let enabled = !fname.ends_with(".disabled");
+            let base_name = fname.trim_end_matches(".disabled");
+            let is_user_mod = cat != "mods" || user_mods.contains(base_name) || !manifest_mods.contains(base_name);
+            let size_kb = entry.metadata().map(|m| m.len() / 1024).unwrap_or(0);
+
+            list.push(InstalledModEntry {
+                filename: fname,
+                enabled,
+                is_user_mod,
+                size_kb,
+                category: cat.to_string(),
+            });
+        }
     }
 
     list.sort_by(|a, b| {
@@ -669,11 +819,16 @@ pub fn toggle_or_delete_installed_mod(
     delete: bool,
 ) -> Result<()> {
     let safe_name = sanitize_relative_path(filename)?;
-    let mods_dir = instance_dir.join("mods");
-    let target = mods_dir.join(&safe_name);
-    if !target.exists() {
-        bail!("Mod file not found: {}", filename);
+    let mut found: Option<(PathBuf, PathBuf)> = None;
+    for sub in &["mods", "resourcepacks", "shaderpacks", "datapacks"] {
+        let dir = instance_dir.join(sub);
+        let path = dir.join(&safe_name);
+        if path.exists() {
+            found = Some((dir, path));
+            break;
+        }
     }
+    let (parent_dir, target) = found.ok_or_else(|| anyhow!("Content file not found: {}", filename))?;
 
     if delete {
         fs::remove_file(&target)?;
@@ -687,12 +842,21 @@ pub fn toggle_or_delete_installed_mod(
                 }
             }
         }
-    } else if filename.ends_with(".jar.disabled") {
+        let registry_file = instance_dir.join(".modrinth-installed.json");
+        if let Ok(raw) = fs::read_to_string(&registry_file) {
+            if let Ok(mut map) = serde_json::from_str::<HashMap<String, InstalledModrinthProject>>(&raw) {
+                map.retain(|_, v| v.filename != filename && v.filename != base_name);
+                if let Ok(s) = serde_json::to_string_pretty(&map) {
+                    let _ = fs::write(&registry_file, s);
+                }
+            }
+        }
+    } else if filename.ends_with(".disabled") {
         let new_name = filename.trim_end_matches(".disabled");
-        fs::rename(&target, mods_dir.join(new_name))?;
-    } else if filename.ends_with(".jar") {
+        fs::rename(&target, parent_dir.join(new_name))?;
+    } else {
         let new_name = format!("{}.disabled", filename);
-        fs::rename(&target, mods_dir.join(new_name))?;
+        fs::rename(&target, parent_dir.join(new_name))?;
     }
 
     Ok(())

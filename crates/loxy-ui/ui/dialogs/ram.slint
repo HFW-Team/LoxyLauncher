@@ -1,142 +1,199 @@
-import { McTheme, McButton, McIconButton } from "../theme.slint";
+import { McTheme, McButton, McIconButton, McSlider } from "../theme.slint";
 
 export component RamDialog inherits Rectangle {
     in property <bool> is-open: false;
-    in-out property <int> max-ram-mb: 6144;
+    in-out property <int> max-ram-mb: 4096;
     in-out property <int> min-ram-mb: 2048;
+    in property <int> recommended-mb: 6144;
     in property <int> system-total-mb: 16384;
-    
+
     callback save-clicked();
     callback close-clicked();
-    
+
     visible: root.is-open;
-    background: #000000bb;
-    TouchArea {}
-    
+    background: #000000cc;
+
+    TouchArea {
+        clicked => { root.close-clicked(); }
+    }
+
     Rectangle {
-        width: 500px;
-        height: 380px;
+        width: 480px;
+        height: 360px;
         background: McTheme.panel-bg;
-        border-color: McTheme.panel-border-highlight;
-        border-width: 1px;
-        
+        border-color: McTheme.panel-border;
+        border-width: 2px;
+
+        TouchArea {}
+
         VerticalLayout {
-            padding: 20px;
-            spacing: 16px;
+            padding: 18px;
+            spacing: 14px;
             alignment: space-between;
-            
+
             HorizontalLayout {
                 alignment: space-between;
-                Text {
-                    text: "ALLOCATED RAM (MEMORY)";
-                    font-size: 14px;
-                    font-weight: 700;
-                    color: McTheme.text-primary;
+                VerticalLayout {
+                    alignment: center;
+                    Text {
+                        text: "ADJUST ALLOCATED RAM";
+                        font-size: 14px;
+                        font-weight: 700;
+                        color: #66bb6a;
+                    }
                 }
                 McIconButton {
+                    text: "X";
                     clicked => { root.close-clicked(); }
                 }
             }
-            
-            Text {
-                text: "Allocate adequate RAM for modpack loading. 6 GB - 8 GB is recommended for modern Fabric/Forge modpacks with shaders.";
-                font-size: 11px;
-                color: McTheme.text-secondary;
-                wrap: word-wrap;
-            }
-            
-            // Value display
+
             Rectangle {
-                background: #141414;
-                border-color: #333333;
+                height: 64px;
+                background: McTheme.inset-bg;
+                border-color: McTheme.inset-border;
                 border-width: 1px;
-                height: 60px;
-                
+
                 VerticalLayout {
                     alignment: center;
-                    spacing: 2px;
+                    spacing: 4px;
+
                     Text {
-                        text: root.max-ram-mb + " MB (" + (root.max-ram-mb / 1024) + " GB)";
+                        text: root.max-ram-mb + " MB (~" + Math.round(root.max-ram-mb / 1024) + " GB)";
                         font-size: 20px;
                         font-weight: 700;
-                        color: #4caf50;
+                        color: #66bb6a;
                         horizontal-alignment: center;
+                    }
+
+                    Text {
+                        text: "Recommended: " + root.recommended-mb + " MB • System Total: " + root.system-total-mb + " MB";
+                        font-size: 11px;
+                        color: #999999;
+                        horizontal-alignment: center;
+                    }
+                }
+            }
+
+            // Interactive RAM Allocation Slider
+            VerticalLayout {
+                spacing: 6px;
+                McSlider {
+                    value <=> root.max-ram-mb;
+                    minimum: 2048;
+                    maximum: Math.max(4096, root.system-total-mb);
+                    step: 512;
+                }
+
+                HorizontalLayout {
+                    alignment: space-between;
+                    Text {
+                        text: "Min: 2048 MB";
+                        font-size: 10px;
+                        color: #888888;
                     }
                     Text {
-                        text: "Total System RAM: " + root.system-total-mb + " MB";
-                        font-size: 11px;
-                        color: McTheme.text-muted;
-                        horizontal-alignment: center;
+                        text: "Recommended: " + root.recommended-mb + " MB";
+                        font-size: 10px;
+                        color: #888888;
+                    }
+                    Text {
+                        text: "Max: " + root.system-total-mb + " MB";
+                        font-size: 10px;
+                        color: #888888;
                     }
                 }
             }
-            
-            // Presets
-            VerticalLayout {
-                spacing: 8px;
-                Text {
-                    text: "QUICK PRESETS:";
-                    font-size: 11px;
-                    font-weight: 700;
-                    color: McTheme.text-muted;
-                }
-                HorizontalLayout {
-                    spacing: 8px;
-                    McButton {
-                        text: "4 GB";
-                        clicked => { root.max-ram-mb = 4096; }
-                    }
-                    McButton {
-                        text: "6 GB";
-                        clicked => { root.max-ram-mb = 6144; }
-                    }
-                    McButton {
-                        text: "8 GB";
-                        clicked => { root.max-ram-mb = 8192; }
-                    }
-                    McButton {
-                        text: "10 GB";
-                        clicked => { root.max-ram-mb = 10240; }
-                    }
-                    McButton {
-                        text: "12 GB";
-                        clicked => { root.max-ram-mb = 12288; }
-                    }
-                }
-            }
-            
-            // Stepper buttons
+
+            // Quick Presets
             HorizontalLayout {
                 spacing: 8px;
                 McButton {
+                    horizontal-stretch: 1;
+                    text: "4 GB";
+                    primary: root.max-ram-mb == 4096;
+                    clicked => { root.max-ram-mb = 4096; }
+                }
+                McButton {
+                    horizontal-stretch: 1;
+                    text: "6 GB";
+                    primary: root.max-ram-mb == 6144;
+                    clicked => { root.max-ram-mb = 6144; }
+                }
+                McButton {
+                    horizontal-stretch: 1;
+                    text: "8 GB";
+                    primary: root.max-ram-mb == 8192;
+                    clicked => { root.max-ram-mb = 8192; }
+                }
+                McButton {
+                    horizontal-stretch: 1;
+                    text: "10 GB";
+                    primary: root.max-ram-mb == 10240;
+                    clicked => { root.max-ram-mb = 10240; }
+                }
+                McButton {
+                    horizontal-stretch: 1;
+                    text: "12 GB";
+                    primary: root.max-ram-mb == 12288;
+                    clicked => { root.max-ram-mb = 12288; }
+                }
+            }
+
+            // Stepper Controls
+            HorizontalLayout {
+                spacing: 8px;
+                McButton {
+                    horizontal-stretch: 1;
                     text: "- 512 MB";
-                    clicked => { if root.max-ram-mb > 2048 { root.max-ram-mb = root.max-ram-mb - 512; } }
+                    clicked => {
+                        if root.max-ram-mb > 2048 {
+                            root.max-ram-mb = root.max-ram-mb - 512;
+                        }
+                    }
                 }
                 McButton {
+                    horizontal-stretch: 1;
                     text: "+ 512 MB";
-                    clicked => { if root.max-ram-mb < root.system-total-mb - 1024 { root.max-ram-mb = root.max-ram-mb + 512; } }
+                    clicked => {
+                        if root.max-ram-mb + 512 <= root.system-total-mb {
+                            root.max-ram-mb = root.max-ram-mb + 512;
+                        }
+                    }
                 }
                 McButton {
+                    horizontal-stretch: 1;
                     text: "- 1 GB";
-                    clicked => { if root.max-ram-mb > 2048 { root.max-ram-mb = root.max-ram-mb - 1024; } }
+                    clicked => {
+                        if root.max-ram-mb >= 3072 {
+                            root.max-ram-mb = root.max-ram-mb - 1024;
+                        }
+                    }
                 }
                 McButton {
+                    horizontal-stretch: 1;
                     text: "+ 1 GB";
-                    clicked => { if root.max-ram-mb < root.system-total-mb - 1024 { root.max-ram-mb = root.max-ram-mb + 1024; } }
+                    clicked => {
+                        if root.max-ram-mb + 1024 <= root.system-total-mb {
+                            root.max-ram-mb = root.max-ram-mb + 1024;
+                        }
+                    }
                 }
             }
-            
+
             HorizontalLayout {
-                spacing: 12px;
+                spacing: 10px;
                 alignment: end;
-                McButton {
-                    text: "SAVE ALLOCATION";
-                    primary: true;
-                    clicked => { root.save-clicked(); }
-                }
+
                 McButton {
                     text: "CANCEL";
                     clicked => { root.close-clicked(); }
+                }
+
+                McButton {
+                    text: "APPLY RAM";
+                    primary: true;
+                    clicked => { root.save-clicked(); }
                 }
             }
         }
