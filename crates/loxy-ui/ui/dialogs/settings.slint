@@ -463,37 +463,6 @@ export component SettingsDialog inherits Rectangle {
                             }
                         }
 
-                        // SECTION 6: MICROSOFT OAUTH CLIENT ID
-                        Rectangle {
-                            background: McTheme.inset-bg;
-                            border-color: McTheme.inset-border;
-                            border-width: 1px;
-
-                            VerticalLayout {
-                                padding: 12px;
-                                spacing: 6px;
-
-                                Text {
-                                    text: "MICROSOFT OAUTH CLIENT ID (DEFAULT: 00000000441cc96b PRE-APPROVED)";
-                                    font-size: 11px;
-                                    font-weight: 700;
-                                    color: #80cbc4;
-                                }
-
-                                HorizontalLayout {
-                                    spacing: 8px;
-                                    McTextInput {
-                                        horizontal-stretch: 1;
-                                        text <=> root.config.azure-client-id;
-                                    }
-                                    McButton {
-                                        text: "DEFAULT";
-                                        font-size: 10px;
-                                        clicked => { root.config.azure-client-id = "00000000441cc96b"; }
-                                    }
-                                }
-                            }
-                        }
                     }
                 }
             }

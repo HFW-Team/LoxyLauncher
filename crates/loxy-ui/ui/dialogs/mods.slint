@@ -729,8 +729,9 @@ export component ModsDialog inherits Rectangle {
                                                     VerticalLayout {
                                                         alignment: center;
                                                         McButton {
-                                                            text: ver.installing ? "..." : ("INSTALL v" + ver.version-number);
-                                                            disabled: ver.installing;
+                                                            text: ver.installing ? "..." : (ver.is-selected ? "✓ SELECTED" : ("INSTALL v" + ver.version-number));
+                                                            disabled: ver.installing || ver.is-selected;
+                                                            gold: !ver.is-selected;
                                                             font-size: 10px;
                                                             h-padding: 10px;
                                                             v-padding: 5px;
@@ -954,7 +955,7 @@ export component ModsDialog inherits Rectangle {
 
                                                 VerticalLayout {
                                                     alignment: center;
-                                                    spacing: 2px;
+                                                    spacing: 3px;
                                                     horizontal-stretch: 1;
 
                                                     HorizontalLayout {
@@ -962,11 +963,26 @@ export component ModsDialog inherits Rectangle {
                                                         alignment: start;
 
                                                         Text {
-                                                            text: mod.filename;
-                                                            font-size: 12px;
+                                                            text: mod.name;
+                                                            font-size: 13px;
                                                             font-weight: 700;
                                                             color: mod.enabled ? #ffffff : #777777;
                                                             overflow: elide;
+                                                        }
+
+                                                        if mod.version != "" : Rectangle {
+                                                            height: 16px;
+                                                            background: #232d25;
+                                                            border-color: #388e3c;
+                                                            border-width: 1px;
+                                                            Text {
+                                                                text: " v" + mod.version + " ";
+                                                                font-size: 9px;
+                                                                font-weight: 700;
+                                                                color: #81c784;
+                                                                horizontal-alignment: center;
+                                                                vertical-alignment: center;
+                                                            }
                                                         }
 
                                                         if mod.category != "mods" : Rectangle {
@@ -1004,10 +1020,22 @@ export component ModsDialog inherits Rectangle {
                                                         }
                                                     }
 
-                                                    Text {
-                                                        text: mod.size-kb + " KB";
-                                                        font-size: 10px;
-                                                        color: #888888;
+                                                    HorizontalLayout {
+                                                        spacing: 8px;
+                                                        alignment: start;
+
+                                                        Text {
+                                                            text: mod.filename;
+                                                            font-size: 10px;
+                                                            color: #777777;
+                                                            overflow: elide;
+                                                        }
+
+                                                        Text {
+                                                            text: "• " + mod.size-kb + " KB";
+                                                            font-size: 10px;
+                                                            color: #666666;
+                                                        }
                                                     }
                                                 }
 
@@ -1144,7 +1172,7 @@ export component ModsDialog inherits Rectangle {
 
                                                 VerticalLayout {
                                                     alignment: center;
-                                                    spacing: 2px;
+                                                    spacing: 3px;
                                                     horizontal-stretch: 1;
 
                                                     HorizontalLayout {
@@ -1152,11 +1180,26 @@ export component ModsDialog inherits Rectangle {
                                                         alignment: start;
 
                                                         Text {
-                                                            text: mod.filename;
-                                                            font-size: 12px;
+                                                            text: mod.name;
+                                                            font-size: 13px;
                                                             font-weight: 700;
                                                             color: mod.enabled ? #ffffff : #777777;
                                                             overflow: elide;
+                                                        }
+
+                                                        if mod.version != "" : Rectangle {
+                                                            height: 16px;
+                                                            background: #182830;
+                                                            border-color: #2b5c8f;
+                                                            border-width: 1px;
+                                                            Text {
+                                                                text: " v" + mod.version + " ";
+                                                                font-size: 9px;
+                                                                font-weight: 700;
+                                                                color: #90caf9;
+                                                                horizontal-alignment: center;
+                                                                vertical-alignment: center;
+                                                            }
                                                         }
 
                                                         if mod.category != "mods" : Rectangle {
@@ -1194,10 +1237,22 @@ export component ModsDialog inherits Rectangle {
                                                         }
                                                     }
 
-                                                    Text {
-                                                        text: mod.size-kb + " KB";
-                                                        font-size: 10px;
-                                                        color: #888888;
+                                                    HorizontalLayout {
+                                                        spacing: 8px;
+                                                        alignment: start;
+
+                                                        Text {
+                                                            text: mod.filename;
+                                                            font-size: 10px;
+                                                            color: #777777;
+                                                            overflow: elide;
+                                                        }
+
+                                                        Text {
+                                                            text: "• " + mod.size-kb + " KB";
+                                                            font-size: 10px;
+                                                            color: #666666;
+                                                        }
                                                     }
                                                 }
 

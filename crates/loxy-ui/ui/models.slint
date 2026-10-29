@@ -49,7 +49,6 @@ export struct ConfigData {
     manifest-url: string,
     server-host: string,
     server-port: string,
-    azure-client-id: string,
 }
 
 export struct DetectedJavaData {
@@ -108,14 +107,23 @@ export struct ModVersionData {
     loaders: string,
     date-published: string,
     installing: bool,
+    is-selected: bool,
 }
 
 export struct InstalledModData {
     filename: string,
+    name: string,
+    version: string,
     size-kb: int,
     enabled: bool,
     is-user-mod: bool,
     category: string,
     icon: image,
     has-icon: bool,
+}
+
+export struct CapeData {
+    id: string,
+    alias: string,
+    is-active: bool,
 }

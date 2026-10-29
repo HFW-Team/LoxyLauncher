@@ -1,5 +1,7 @@
+use crate::vault::{encrypt_and_save_vault, load_and_decrypt_vault, AccountTokens};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use sysinfo::System;
@@ -11,14 +13,17 @@ pub const DEFAULT_MANIFEST_URL: &str = match option_env!("LOXY_MANIFEST_URL") {
     None => "https://raw.githubusercontent.com/loxy-community/modpack-manifest/main/launcher-manifest.json",
 };
 
-/// Compile-time default Microsoft OAuth Client ID for Device Code OAuth.
-/// Defaults to the pre-whitelisted Minecraft Client ID ("00000000441cc96b") so
-/// `/authentication/login_with_xbox` works out of the box without requiring
-/// manual Microsoft aka.ms/AppRegInfo approval.
-pub const DEFAULT_AZURE_CLIENT_ID: &str = match option_env!("LOXY_AZURE_CLIENT_ID") {
+/// Verified Mojang Microsoft OAuth Client ID for LoxyLauncher.
+pub const AZURE_CLIENT_ID: &str = match option_env!("LOXY_AZURE_CLIENT_ID") {
     Some(id) => id,
-    None => "00000000441cc96b",
+    None => "bbf3ce62-2e8d-4a2b-b99c-f1ad59ee7371",
 };
+
+pub const DEFAULT_AZURE_CLIENT_ID: &str = AZURE_CLIENT_ID;
+
+fn default_azure_client_id() -> String {
+    AZURE_CLIENT_ID.to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -38,7 +43,9 @@ impl Default for CloseBehavior {
 pub struct MinecraftAccount {
     pub uuid: String,
     pub username: String,
+    #[serde(default)]
     pub access_token: String,
+    #[serde(default)]
     pub refresh_token: String,
     pub expires_at: i64,
     pub skin_url: Option<String>,
@@ -62,6 +69,7 @@ pub struct LauncherConfig {
     pub manifest_url: String,
     pub server_host: String,
     pub server_port: u16,
+    #[serde(default = "default_azure_client_id", skip_serializing)]
     pub azure_client_id: String,
     pub account: Option<MinecraftAccount>,
     #[serde(default)]
@@ -99,26 +107,99 @@ impl LauncherConfig {
 
     pub fn load() -> Result<Self> {
         let path = Self::config_file_path();
-        if path.exists() {
+        let base_dir = Self::base_app_dir();
+        let mut cfg = if path.exists() {
             let raw = fs::read_to_string(&path)
                 .with_context(|| format!("Failed to read config at {:?}", path))?;
-            let cfg: LauncherConfig = serde_json::from_str(&raw)
-                .with_context(|| "Failed to parse launcher config.json")?;
-            Ok(cfg)
+            serde_json::from_str(&raw)
+                .with_context(|| "Failed to parse launcher config.json")?
         } else {
             let default_cfg = Self::default();
             let _ = default_cfg.save();
-            Ok(default_cfg)
+            default_cfg
+        };
+
+        // Decrypt secure tokens from encrypted vault
+        let vault_tokens = load_and_decrypt_vault(&base_dir).unwrap_or_default();
+        let mut needs_migration_save = false;
+
+        for acc in &mut cfg.accounts {
+            if let Some(tokens) = vault_tokens.get(&acc.uuid) {
+                acc.access_token = tokens.access_token.clone();
+                acc.refresh_token = tokens.refresh_token.clone();
+            } else if !acc.refresh_token.is_empty() {
+                // Account had tokens in plaintext config.json from previous version;
+                // flag for saving into encrypted vault and scrubbing from config.json.
+                needs_migration_save = true;
+            }
         }
+
+        if let Some(active) = &mut cfg.account {
+            if let Some(tokens) = vault_tokens.get(&active.uuid) {
+                active.access_token = tokens.access_token.clone();
+                active.refresh_token = tokens.refresh_token.clone();
+            }
+        }
+
+        if cfg.azure_client_id.trim().is_empty() || cfg.azure_client_id == "00000000441cc96b" {
+            cfg.azure_client_id = AZURE_CLIENT_ID.to_string();
+            needs_migration_save = true;
+        }
+
+        if needs_migration_save {
+            let _ = cfg.save();
+        }
+
+        Ok(cfg)
     }
 
     pub fn save(&self) -> Result<()> {
         let path = Self::config_file_path();
+        let base_dir = Self::base_app_dir();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create config directory {:?}", parent))?;
         }
-        let serialized = serde_json::to_string_pretty(self)?;
+
+        // 1. Save sensitive tokens securely into encrypted vault
+        let mut vault_map: HashMap<String, AccountTokens> = HashMap::new();
+        for acc in &self.accounts {
+            if !acc.refresh_token.is_empty() || !acc.access_token.is_empty() {
+                vault_map.insert(
+                    acc.uuid.clone(),
+                    AccountTokens {
+                        access_token: acc.access_token.clone(),
+                        refresh_token: acc.refresh_token.clone(),
+                    },
+                );
+            }
+        }
+        if let Some(active) = &self.account {
+            if !active.refresh_token.is_empty() || !active.access_token.is_empty() {
+                vault_map.insert(
+                    active.uuid.clone(),
+                    AccountTokens {
+                        access_token: active.access_token.clone(),
+                        refresh_token: active.refresh_token.clone(),
+                    },
+                );
+            }
+        }
+
+        let _ = encrypt_and_save_vault(&base_dir, &vault_map);
+
+        // 2. Sanitize tokens before writing config.json so tokens are never exposed in plaintext
+        let mut sanitized = self.clone();
+        for acc in &mut sanitized.accounts {
+            acc.access_token.clear();
+            acc.refresh_token.clear();
+        }
+        if let Some(active) = &mut sanitized.account {
+            active.access_token.clear();
+            active.refresh_token.clear();
+        }
+
+        let serialized = serde_json::to_string_pretty(&sanitized)?;
         fs::write(&path, serialized)
             .with_context(|| format!("Failed to write config file {:?}", path))?;
         Ok(())

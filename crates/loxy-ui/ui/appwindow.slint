@@ -2,7 +2,7 @@ import { McTheme, McButton } from "theme.slint";
 import {
     ServerStatusData, AccountData, ModpackData, ConfigData,
     DetectedJavaData, ProgressData, LogEntryData, ModHitData,
-    ModVersionData, InstalledModData, StoredAccountData
+    ModVersionData, InstalledModData, StoredAccountData, CapeData
 } from "models.slint";
 import { AccountPill, ServerStatusPanel, ProfileTile } from "components/cards.slint";
 import { AuthDialog } from "dialogs/auth.slint";
@@ -11,6 +11,7 @@ import { SettingsDialog } from "dialogs/settings.slint";
 import { ModsDialog } from "dialogs/mods.slint";
 import { ConsoleDialog } from "dialogs/console.slint";
 import { AccountsDialog } from "dialogs/accounts.slint";
+import { SkinDialog } from "dialogs/skin.slint";
 import { ScrollView } from "std-widgets.slint";
 
 export component MainWindow inherits Window {
@@ -72,7 +73,6 @@ export component MainWindow inherits Window {
         manifest-url: "https://raw.githubusercontent.com/loxy-community/modpack-manifest/main/launcher-manifest.json",
         server-host: "play.loxy.gg",
         server-port: "25565",
-        azure-client-id: "00000000441cc96b",
     };
 
     in property <[DetectedJavaData]> detected-javas: [];
@@ -98,6 +98,16 @@ export component MainWindow inherits Window {
     in-out property <bool> mods-open: false;
     in-out property <bool> console-open: false;
     in-out property <bool> accounts-open: false;
+    in-out property <bool> skin-open: false;
+
+    // Skin Dialog Properties
+    in property <image> skin-preview-image;
+    in property <string> skin-active-variant: "CLASSIC";
+    in property <string> skin-selected-path: "";
+    in property <[CapeData]> skin-capes: [];
+    in property <string> skin-active-cape-id: "";
+    in property <string> skin-status: "";
+    in property <bool> skin-is-uploading: false;
 
     // Accounts Dialog Properties
     in property <[StoredAccountData]> all-accounts: [];
@@ -107,6 +117,7 @@ export component MainWindow inherits Window {
     in property <string> auth-verification-uri: "https://microsoft.com/link";
     in property <string> auth-status: "";
     in property <bool> auth-code-copied: false;
+    in property <bool> auth-url-copied: false;
 
     // Console Dialog Properties
     in property <[LogEntryData]> console-logs: [];
@@ -146,6 +157,7 @@ export component MainWindow inherits Window {
     callback select-account-clicked(string);
     callback remove-account-clicked(string);
     callback copy-auth-code-clicked();
+    callback copy-auth-url-clicked();
     callback open-auth-browser-clicked();
 
     callback save-ram-clicked(int);
@@ -171,6 +183,16 @@ export component MainWindow inherits Window {
     callback mod-installed-category-selected(string);
     callback mod-toggle-clicked(string);
     callback mod-delete-clicked(string);
+
+    callback open-skin-dialog-clicked();
+    callback skin-rotate(length, length);
+    callback skin-reset-view();
+    callback skin-select-file();
+    callback skin-set-variant(string);
+    callback skin-upload();
+    callback skin-reset();
+    callback skin-equip-cape(string);
+    callback skin-unequip-cape();
 
     // Main Root Layout
     VerticalLayout {
@@ -264,7 +286,19 @@ export component MainWindow inherits Window {
                         }
                     }
 
-                    // 3. SETTINGS (⚙ Cogwheel icon)
+                    // 3. SKIN & CAPE
+                    if root.account.logged-in : VerticalLayout {
+                        alignment: center;
+                        McButton {
+                            text: "SKIN";
+                            font-size: 11px;
+                            h-padding: 10px;
+                            v-padding: 7px;
+                            clicked => { root.open-skin-dialog-clicked(); }
+                        }
+                    }
+
+                    // 4. SETTINGS (⚙ Cogwheel icon)
                     VerticalLayout {
                         alignment: center;
                         McButton {
@@ -352,11 +386,14 @@ export component MainWindow inherits Window {
 
                     HorizontalLayout {
                         padding: 14px;
+                        spacing: 12px;
                         alignment: space-between;
 
                         VerticalLayout {
                             alignment: center;
                             spacing: 4px;
+                            horizontal-stretch: 1;
+                            min-width: 0px;
 
                             Text {
                                 text: root.modpack.name;
@@ -371,6 +408,7 @@ export component MainWindow inherits Window {
                                 font-size: 11px;
                                 font-weight: 700;
                                 color: #81c784;
+                                overflow: elide;
                             }
                         }
 
@@ -381,10 +419,11 @@ export component MainWindow inherits Window {
                             VerticalLayout {
                                 alignment: center;
                                 McButton {
+                                    width: 78px;
                                     text: root.is-refreshing ? "..." : "REFRESH";
                                     disabled: root.is-refreshing;
                                     font-size: 11px;
-                                    h-padding: 10px;
+                                    h-padding: 8px;
                                     v-padding: 5px;
                                     clicked => { root.refresh-clicked(); }
                                 }
@@ -394,8 +433,7 @@ export component MainWindow inherits Window {
                                 alignment: center;
                                 Rectangle {
                                     height: 26px;
-                                    width: root.modpack.is-offline-fallback ? 112px :
-                                           (root.modpack.update-available ? 110px : 126px);
+                                    width: 128px;
                                     background: McTheme.inset-bg;
                                     border-color: McTheme.inset-border;
                                     border-width: 1px;
@@ -597,16 +635,15 @@ export component MainWindow inherits Window {
             border-color: #0d0d0d;
             border-width: 2px;
 
-            GridLayout {
+            HorizontalLayout {
                 padding-left: 22px;
                 padding-right: 22px;
                 spacing: 16px;
 
-                // Left Column (col 0): Sync Progress or Ready Indicator
+                // Left Column: Sync Progress or Ready Indicator + Username
                 Rectangle {
-                    col: 0;
                     horizontal-stretch: 1;
-                    min-width: 0px;
+                    min-width: 250px;
 
                     if root.progress.active : VerticalLayout {
                         alignment: center;
@@ -669,7 +706,8 @@ export component MainWindow inherits Window {
 
                         VerticalLayout {
                             alignment: center;
-                            spacing: 2px;
+                            spacing: 3px;
+                            min-width: 0px;
 
                             Text {
                                 text: root.modpack.update-available ? ("Update v" + root.modpack.version + " Ready") : (root.modpack.name + " Ready");
@@ -682,45 +720,37 @@ export component MainWindow inherits Window {
                             Text {
                                 text: root.account.logged-in ? ("Signed in as " + root.account.username) : "Sign in with Microsoft to play";
                                 font-size: 11px;
-                                color: #aaaaaa;
+                                color: #c8e6c9;
                                 overflow: elide;
                             }
                         }
                     }
                 }
 
-                // Center Column (col 1): Centered Play Button
-                Rectangle {
-                    col: 1;
-                    horizontal-stretch: 1;
-                    min-width: 0px;
+                // Center Column: Centered Play Button
+                VerticalLayout {
+                    alignment: center;
+                    width: 250px;
 
-                    HorizontalLayout {
-                        alignment: center;
-                        VerticalLayout {
-                            alignment: center;
-                            McButton {
-                                width: 240px;
-                                height: 46px;
-                                text: root.is-launching ? "LAUNCHING..." :
-                                      (!root.account.logged-in ? "SIGN IN & PLAY" :
-                                      (root.modpack.update-available ? "UPDATE & PLAY" : "► PLAY"));
-                                primary: true;
-                                disabled: root.is-launching;
-                                font-size: 16px;
-                                h-padding: 24px;
-                                v-padding: 10px;
-                                clicked => { root.play-clicked(); }
-                            }
-                        }
+                    McButton {
+                        width: 240px;
+                        height: 46px;
+                        text: root.is-launching ? "LAUNCHING..." :
+                              (!root.account.logged-in ? "SIGN IN & PLAY" :
+                              (root.modpack.update-available ? "UPDATE & PLAY" : "► PLAY"));
+                        primary: true;
+                        disabled: root.is-launching;
+                        font-size: 16px;
+                        h-padding: 24px;
+                        v-padding: 10px;
+                        clicked => { root.play-clicked(); }
                     }
                 }
 
-                // Right Column (col 2): Quick Actions
+                // Right Column: Quick Actions (Symmetric width to Left)
                 Rectangle {
-                    col: 2;
                     horizontal-stretch: 1;
-                    min-width: 0px;
+                    min-width: 250px;
 
                     HorizontalLayout {
                         spacing: 8px;
@@ -761,6 +791,10 @@ export component MainWindow inherits Window {
         accounts: root.all-accounts;
         select-account-clicked(uuid) => { root.select-account-clicked(uuid); }
         remove-account-clicked(uuid) => { root.remove-account-clicked(uuid); }
+        open-skin-clicked => {
+            root.accounts-open = false;
+            root.open-skin-dialog-clicked();
+        }
         add-account-clicked => {
             root.accounts-open = false;
             root.login-clicked();
@@ -774,7 +808,9 @@ export component MainWindow inherits Window {
         direct-verification-uri: root.auth-verification-uri;
         status-text: root.auth-status;
         code-copied: root.auth-code-copied;
+        url-copied: root.auth-url-copied;
         copy-code-clicked => { root.copy-auth-code-clicked(); }
+        copy-url-clicked => { root.copy-auth-url-clicked(); }
         open-browser-clicked => { root.open-auth-browser-clicked(); }
         close-clicked => { root.auth-open = false; }
     }
@@ -851,5 +887,26 @@ export component MainWindow inherits Window {
         copy-logs-clicked => { root.copy-console-logs-clicked(); }
         clear-logs-clicked => { root.clear-console-logs-clicked(); }
         close-clicked => { root.console-open = false; }
+    }
+
+    SkinDialog {
+        is-open <=> root.skin-open;
+        preview-image: root.skin-preview-image;
+        username: root.account.username;
+        active-variant: root.skin-active-variant;
+        selected-skin-path: root.skin-selected-path;
+        capes: root.skin-capes;
+        active-cape-id: root.skin-active-cape-id;
+        status-text: root.skin-status;
+        is-uploading: root.skin-is-uploading;
+        close-clicked => { root.skin-open = false; }
+        rotate-character(dx, dy) => { root.skin-rotate(dx, dy); }
+        reset-view-clicked => { root.skin-reset-view(); }
+        select-skin-file-clicked => { root.skin-select-file(); }
+        set-variant-clicked(v) => { root.skin-set-variant(v); }
+        upload-skin-clicked => { root.skin-upload(); }
+        reset-skin-clicked => { root.skin-reset(); }
+        equip-cape-clicked(cid) => { root.skin-equip-cape(cid); }
+        unequip-cape-clicked => { root.skin-unequip-cape(); }
     }
 }

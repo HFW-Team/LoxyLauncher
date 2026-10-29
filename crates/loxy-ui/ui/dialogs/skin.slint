@@ -1,0 +1,334 @@
+import { McTheme, McButton, McIconButton } from "../theme.slint";
+import { CapeData } from "../models.slint";
+
+export component SkinDialog inherits Rectangle {
+    in property <bool> is-open: false;
+    in property <image> preview-image;
+    in property <string> username: "";
+    in property <string> active-variant: "CLASSIC"; // "CLASSIC" or "SLIM"
+    in property <string> selected-skin-path: "";
+    in property <[CapeData]> capes: [];
+    in property <string> active-cape-id: "";
+    in property <string> status-text: "";
+    in property <bool> is-uploading: false;
+
+    callback close-clicked();
+    callback rotate-character(length, length);
+    callback reset-view-clicked();
+    callback select-skin-file-clicked();
+    callback set-variant-clicked(string);
+    callback upload-skin-clicked();
+    callback reset-skin-clicked();
+    callback equip-cape-clicked(string);
+    callback unequip-cape-clicked();
+
+    visible: root.is-open;
+    background: #000000dd;
+
+    TouchArea {
+        clicked => { root.close-clicked(); }
+    }
+
+    Rectangle {
+        width: 700px;
+        height: 520px;
+        background: McTheme.panel-bg;
+        border-color: McTheme.panel-border;
+        border-width: 2px;
+
+        TouchArea {}
+
+        VerticalLayout {
+            padding: 18px;
+            spacing: 12px;
+
+            // Header
+            HorizontalLayout {
+                alignment: space-between;
+                VerticalLayout {
+                    alignment: center;
+                    Text {
+                        text: "SKIN & CAPE CUSTOMIZATION (" + root.username + ")";
+                        font-size: 14px;
+                        font-weight: 700;
+                        color: #ffd54f;
+                    }
+                }
+
+                McIconButton {
+                    text: "X";
+                    clicked => { root.close-clicked(); }
+                }
+            }
+
+            Rectangle {
+                height: 2px;
+                background: #181818;
+            }
+
+            // Two-column Main Body
+            HorizontalLayout {
+                spacing: 16px;
+                vertical-stretch: 1;
+
+                // LEFT: 3D Viewport
+                VerticalLayout {
+                    width: 290px;
+                    spacing: 8px;
+
+                    Rectangle {
+                        vertical-stretch: 1;
+                        background: #111111;
+                        border-color: #2c2c2c;
+                        border-width: 1px;
+                        clip: true;
+
+                        Image {
+                            width: 100%;
+                            height: 100%;
+                            source: root.preview-image;
+                            image-fit: contain;
+                        }
+
+                        drag-area := TouchArea {
+                            property <length> last-x: 0px;
+                            property <length> last-y: 0px;
+                            mouse-cursor: grab;
+
+                            pointer-event(ev) => {
+                                if (ev.kind == PointerEventKind.down) {
+                                    last-x = self.mouse-x;
+                                    last-y = self.mouse-y;
+                                }
+                            }
+
+                            moved => {
+                                if (self.pressed) {
+                                    root.rotate-character(self.mouse-x - last-x, self.mouse-y - last-y);
+                                    last-x = self.mouse-x;
+                                    last-y = self.mouse-y;
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        alignment: space-between;
+
+                        Text {
+                            text: "↔ Drag to rotate • ↕ Tilt";
+                            font-size: 10px;
+                            color: #888888;
+                            vertical-alignment: center;
+                        }
+
+                        McButton {
+                            text: "RESET VIEW";
+                            font-size: 9px;
+                            h-padding: 8px;
+                            v-padding: 3px;
+                            clicked => { root.reset-view-clicked(); }
+                        }
+                    }
+                }
+
+                // RIGHT: Skin & Cape Management Controls
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 12px;
+
+                    // Section 1: Skin File & Model
+                    Rectangle {
+                        background: McTheme.inset-bg;
+                        border-color: McTheme.inset-border;
+                        border-width: 1px;
+
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: 8px;
+
+                            Text {
+                                text: "1. MINECRAFT SKIN";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: #80cbc4;
+                            }
+
+                            // Model Arm Variant
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: "Model Variant:";
+                                    font-size: 11px;
+                                    color: #cccccc;
+                                    vertical-alignment: center;
+                                }
+
+                                McButton {
+                                    text: "CLASSIC (4px)";
+                                    primary: root.active-variant == "CLASSIC";
+                                    font-size: 10px;
+                                    h-padding: 8px;
+                                    v-padding: 4px;
+                                    clicked => { root.set-variant-clicked("CLASSIC"); }
+                                }
+
+                                McButton {
+                                    text: "SLIM (3px)";
+                                    primary: root.active-variant == "SLIM";
+                                    font-size: 10px;
+                                    h-padding: 8px;
+                                    v-padding: 4px;
+                                    clicked => { root.set-variant-clicked("SLIM"); }
+                                }
+                            }
+
+                            // Choose Local PNG
+                            HorizontalLayout {
+                                spacing: 8px;
+                                McButton {
+                                    text: "SELECT SKIN PNG...";
+                                    font-size: 10px;
+                                    h-padding: 10px;
+                                    v-padding: 5px;
+                                    clicked => { root.select-skin-file-clicked(); }
+                                }
+
+                                Text {
+                                    text: root.selected-skin-path != "" ? root.selected-skin-path : "Current skin loaded";
+                                    font-size: 10px;
+                                    color: #999999;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                }
+                            }
+
+                            // Upload / Reset Buttons
+                            HorizontalLayout {
+                                spacing: 8px;
+
+                                McButton {
+                                    text: root.is-uploading ? "UPLOADING..." : "UPLOAD SKIN TO MOJANG";
+                                    primary: true;
+                                    disabled: root.is-uploading || root.selected-skin-path == "";
+                                    font-size: 10px;
+                                    h-padding: 10px;
+                                    v-padding: 5px;
+                                    clicked => { root.upload-skin-clicked(); }
+                                }
+
+                                McButton {
+                                    text: "RESET SKIN";
+                                    danger: true;
+                                    disabled: root.is-uploading;
+                                    font-size: 10px;
+                                    h-padding: 8px;
+                                    v-padding: 5px;
+                                    clicked => { root.reset-skin-clicked(); }
+                                }
+                            }
+                        }
+                    }
+
+                    // Section 2: Capes
+                    Rectangle {
+                        vertical-stretch: 1;
+                        background: McTheme.inset-bg;
+                        border-color: McTheme.inset-border;
+                        border-width: 1px;
+
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: 8px;
+
+                            Text {
+                                text: "2. OFFICIAL CAPES (" + root.capes.length + " OWNED)";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: #80cbc4;
+                            }
+
+                            if root.capes.length == 0 : Text {
+                                text: "No official capes registered on this account.";
+                                font-size: 11px;
+                                color: #777777;
+                                vertical-alignment: center;
+                                height: 36px;
+                            }
+
+                            for cape in root.capes : Rectangle {
+                                height: 34px;
+                                background: cape.id == root.active-cape-id ? #1b301c : #181818;
+                                border-color: cape.id == root.active-cape-id ? #4caf50 : #2a2a2a;
+                                border-width: 1px;
+
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    spacing: 8px;
+                                    alignment: space-between;
+
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Text {
+                                            text: cape.alias != "" ? cape.alias : "Official Cape";
+                                            font-size: 11px;
+                                            font-weight: 700;
+                                            color: #ffffff;
+                                        }
+                                    }
+
+                                    VerticalLayout {
+                                        alignment: center;
+                                        McButton {
+                                            text: cape.id == root.active-cape-id ? "✓ EQUIPPED" : "EQUIP";
+                                            primary: cape.id != root.active-cape-id;
+                                            disabled: cape.id == root.active-cape-id;
+                                            font-size: 9px;
+                                            h-padding: 8px;
+                                            v-padding: 4px;
+                                            clicked => { root.equip-cape-clicked(cape.id); }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if root.active-cape-id != "" : HorizontalLayout {
+                                alignment: start;
+                                McButton {
+                                    text: "UNEQUIP CURRENT CAPE";
+                                    font-size: 9px;
+                                    h-padding: 8px;
+                                    v-padding: 4px;
+                                    clicked => { root.unequip-cape-clicked(); }
+                                }
+                            }
+                        }
+                    }
+
+                    // Status Message
+                    if root.status-text != "" : Text {
+                        text: root.status-text;
+                        font-size: 11px;
+                        font-weight: 700;
+                        color: #81c784;
+                        overflow: elide;
+                    }
+                }
+            }
+
+            // Footer
+            HorizontalLayout {
+                alignment: end;
+                McButton {
+                    text: "CLOSE";
+                    font-size: 11px;
+                    h-padding: 16px;
+                    v-padding: 7px;
+                    clicked => { root.close-clicked(); }
+                }
+            }
+        }
+    }
+}

@@ -357,7 +357,7 @@ async fn exchange_ms_token_for_minecraft(
         let body = mc_resp.text().await.unwrap_or_default();
         if body.contains("Invalid app registration") {
             bail!(
-                "Minecraft Services rejected your custom Azure Client ID because Microsoft requires manual partner approval (aka.ms/AppRegInfo). In Settings, click 'DEFAULT' next to Client ID to use the pre-approved Minecraft Client ID (00000000441cc96b)."
+                "Minecraft Services rejected the Azure Client ID. Please verify your client configuration: {}", body
             );
         }
         bail!("Minecraft Services login failed: {}", body);
@@ -406,4 +406,145 @@ async fn exchange_ms_token_for_minecraft(
         expires_at,
         skin_url,
     })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayerSkin {
+    pub id: String,
+    pub state: String,
+    pub url: String,
+    #[serde(default = "default_skin_variant")]
+    pub variant: String,
+    pub alias: Option<String>,
+}
+
+fn default_skin_variant() -> String {
+    "CLASSIC".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayerCape {
+    pub id: String,
+    pub state: String,
+    pub url: String,
+    pub alias: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayerProfileDetails {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub skins: Vec<PlayerSkin>,
+    #[serde(default)]
+    pub capes: Vec<PlayerCape>,
+}
+
+pub async fn fetch_player_profile_details(
+    client: &Client,
+    access_token: &str,
+) -> Result<PlayerProfileDetails> {
+    let resp = client
+        .get("https://api.minecraftservices.com/minecraft/profile")
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .context("Failed to query Minecraft profile details")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        bail!("Minecraft profile query failed ({}): {}", status, body);
+    }
+
+    let details: PlayerProfileDetails = resp
+        .json()
+        .await
+        .context("Failed to parse Minecraft profile details JSON")?;
+    Ok(details)
+}
+
+pub async fn upload_player_skin(
+    client: &Client,
+    access_token: &str,
+    skin_png_bytes: &[u8],
+    variant: &str,
+) -> Result<()> {
+    let part = reqwest::multipart::Part::bytes(skin_png_bytes.to_vec())
+        .file_name("skin.png")
+        .mime_str("image/png")
+        .context("Failed to create multipart form part for skin")?;
+
+    let form = reqwest::multipart::Form::new()
+        .text("variant", variant.to_lowercase())
+        .part("file", part);
+
+    let resp = client
+        .post("https://api.minecraftservices.com/minecraft/profile/skins")
+        .bearer_auth(access_token)
+        .multipart(form)
+        .send()
+        .await
+        .context("Failed to upload player skin")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        bail!("Skin upload failed ({}): {}", status, body);
+    }
+
+    Ok(())
+}
+
+pub async fn set_player_cape(
+    client: &Client,
+    access_token: &str,
+    cape_id: Option<&str>,
+) -> Result<()> {
+    if let Some(cid) = cape_id.filter(|s| !s.trim().is_empty()) {
+        let payload = json!({ "capeId": cid });
+        let resp = client
+            .put("https://api.minecraftservices.com/minecraft/profile/capes/active")
+            .bearer_auth(access_token)
+            .json(&payload)
+            .send()
+            .await
+            .context("Failed to equip cape")?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            bail!("Equip cape failed ({}): {}", status, body);
+        }
+    } else {
+        let resp = client
+            .delete("https://api.minecraftservices.com/minecraft/profile/capes/active")
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .context("Failed to unequip cape")?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            bail!("Unequip cape failed ({}): {}", status, body);
+        }
+    }
+    Ok(())
+}
+
+pub async fn reset_player_skin(client: &Client, access_token: &str) -> Result<()> {
+    let resp = client
+        .delete("https://api.minecraftservices.com/minecraft/profile/skins/active")
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .context("Failed to reset player skin")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        bail!("Reset skin failed ({}): {}", status, body);
+    }
+    Ok(())
 }

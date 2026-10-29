@@ -9,6 +9,7 @@ export component AccountsDialog inherits Rectangle {
     callback select-account-clicked(string); // uuid
     callback remove-account-clicked(string); // uuid
     callback add-account-clicked();
+    callback open-skin-clicked();
 
     visible: root.is-open;
     background: #000000cc;
@@ -174,6 +175,14 @@ export component AccountsDialog inherits Rectangle {
                                 alignment: center;
                                 HorizontalLayout {
                                     spacing: 6px;
+
+                                    if acc.is-active : McButton {
+                                        text: "SKIN & CAPE";
+                                        font-size: 10px;
+                                        h-padding: 8px;
+                                        v-padding: 5px;
+                                        clicked => { root.open-skin-clicked(); }
+                                    }
 
                                     if !acc.is-active : McButton {
                                         text: "SELECT";

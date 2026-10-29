@@ -206,6 +206,12 @@ struct ModrinthSearchResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstalledModEntry {
     pub filename: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub mod_version: String,
+    #[serde(default)]
+    pub mod_id: Option<String>,
     pub enabled: bool,
     pub is_user_mod: bool,
     pub size_kb: u64,
@@ -584,6 +590,116 @@ pub fn extract_icon_from_archive(file_path: &Path) -> Option<Vec<u8>> {
     None
 }
 
+/// Extracts (display_name, version, mod_id) from a .jar or .zip archive.
+pub fn extract_metadata_from_archive(file_path: &Path) -> (String, String, Option<String>) {
+    let clean_fname = file_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let base_fname = clean_fname
+        .trim_end_matches(".disabled")
+        .trim_end_matches(".jar")
+        .trim_end_matches(".zip");
+
+    let file = match fs::File::open(file_path) {
+        Ok(f) => f,
+        Err(_) => return (base_fname.to_string(), String::new(), None),
+    };
+    let mut archive = match zip::ZipArchive::new(file) {
+        Ok(a) => a,
+        Err(_) => return (base_fname.to_string(), String::new(), None),
+    };
+
+    // 1. Check Fabric: fabric.mod.json
+    if let Ok(mut zf) = archive.by_name("fabric.mod.json") {
+        let mut text = String::new();
+        if std::io::Read::read_to_string(&mut zf, &mut text).is_ok() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                let id = v.get("id").and_then(|s| s.as_str()).map(|s| s.to_string());
+                let name = v.get("name").and_then(|s| s.as_str()).map(|s| s.to_string());
+                let ver = v.get("version").and_then(|s| s.as_str()).map(|s| s.to_string());
+                if name.is_some() || id.is_some() {
+                    let dname = name.or_else(|| id.clone()).unwrap_or_else(|| base_fname.to_string());
+                    return (dname, ver.unwrap_or_default(), id);
+                }
+            }
+        }
+    }
+
+    // 2. Check Quilt: quilt.mod.json
+    if let Ok(mut zf) = archive.by_name("quilt.mod.json") {
+        let mut text = String::new();
+        if std::io::Read::read_to_string(&mut zf, &mut text).is_ok() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                let id = v.get("quilt_loader").and_then(|q| q.get("id")).and_then(|s| s.as_str()).map(|s| s.to_string());
+                let meta = v.get("quilt_loader").and_then(|q| q.get("metadata"));
+                let name = meta.and_then(|m| m.get("name")).and_then(|s| s.as_str()).map(|s| s.to_string());
+                let ver = meta.and_then(|m| m.get("version")).and_then(|s| s.as_str()).map(|s| s.to_string());
+                if name.is_some() || id.is_some() {
+                    let dname = name.or_else(|| id.clone()).unwrap_or_else(|| base_fname.to_string());
+                    return (dname, ver.unwrap_or_default(), id);
+                }
+            }
+        }
+    }
+
+    // 3. Check Forge / NeoForge: META-INF/mods.toml or META-INF/neoforge.mods.toml
+    for toml_name in ["META-INF/neoforge.mods.toml", "META-INF/mods.toml"] {
+        if let Ok(mut zf) = archive.by_name(toml_name) {
+            let mut text = String::new();
+            if std::io::Read::read_to_string(&mut zf, &mut text).is_ok() {
+                let mut dname = None;
+                let mut dver = None;
+                let mut did = None;
+                for line in text.lines() {
+                    let trim = line.trim();
+                    if trim.starts_with("displayName") {
+                        if let Some((_, val)) = trim.split_once('=') {
+                            dname = Some(val.trim().trim_matches('"').trim_matches('\'').to_string());
+                        }
+                    } else if trim.starts_with("version") {
+                        if let Some((_, val)) = trim.split_once('=') {
+                            dver = Some(val.trim().trim_matches('"').trim_matches('\'').to_string());
+                        }
+                    } else if trim.starts_with("modId") {
+                        if let Some((_, val)) = trim.split_once('=') {
+                            did = Some(val.trim().trim_matches('"').trim_matches('\'').to_string());
+                        }
+                    }
+                }
+                if dname.is_some() || did.is_some() {
+                    let final_name = dname.or_else(|| did.clone()).unwrap_or_else(|| base_fname.to_string());
+                    return (final_name, dver.unwrap_or_default(), did);
+                }
+            }
+        }
+    }
+
+    // 4. Check pack.mcmeta for resource packs and data packs
+    if let Ok(mut zf) = archive.by_name("pack.mcmeta") {
+        let mut text = String::new();
+        if std::io::Read::read_to_string(&mut zf, &mut text).is_ok() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(desc) = v.get("pack").and_then(|p| p.get("description")).and_then(|s| s.as_str()) {
+                    return (base_fname.to_string(), desc.to_string(), None);
+                }
+            }
+        }
+    }
+
+    // Fallback heuristic: split filename on '-'
+    let parts: Vec<&str> = base_fname.split('-').collect();
+    if parts.len() >= 2 {
+        let last = parts[parts.len() - 1];
+        if last.chars().next().map(|c| c.is_ascii_digit() || c == 'v').unwrap_or(false) {
+            let name = parts[0..parts.len() - 1].join("-");
+            return (name, last.to_string(), None);
+        }
+    }
+
+    (base_fname.to_string(), String::new(), None)
+}
+
 /// Installs a mod or other content from Modrinth directly into `<instance_dir>/mods/`, `resourcepacks/`, `shaderpacks/`, or `datapacks/`.
 /// If `version_id` is specified, installs that exact version; otherwise selects the latest matching version.
 /// Automatically replaces/removes any previously installed version of the same project.
@@ -708,6 +824,53 @@ pub async fn install_modrinth_mod(
 
     download_and_verify_file(client, &target_file.url, &dest_path, sha1, None, sha512).await?;
 
+    let (disp_name, ver_str, mod_id) = extract_metadata_from_archive(&dest_path);
+
+    // Track overridden manifest mods so sync doesn't restore old versions
+    let overridden_file = instance_dir.join(".overridden-manifest-mods.json");
+    let mut overridden_mods: HashSet<String> = fs::read_to_string(&overridden_file)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    // Scan for and remove any previous versions of this mod (by mod_id or project_id or filename match)
+    if let Ok(read_dir) = fs::read_dir(&dest_dir) {
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let fname = entry.file_name().to_string_lossy().to_string();
+            let base = fname.trim_end_matches(".disabled");
+            if base == target_file.filename {
+                continue;
+            }
+
+            let mut is_match = false;
+            if let Some(prev) = installed_map.get(project_id) {
+                if prev.filename == base {
+                    is_match = true;
+                }
+            }
+            if !is_match && mod_id.is_some() {
+                let (_, _, other_id) = extract_metadata_from_archive(&path);
+                if other_id == mod_id {
+                    is_match = true;
+                }
+            }
+
+            if is_match {
+                let _ = fs::remove_file(&path);
+                let disabled = dest_dir.join(format!("{}.disabled", base));
+                let _ = fs::remove_file(disabled);
+                overridden_mods.insert(base.to_string());
+            }
+        }
+    }
+    if let Ok(serialized) = serde_json::to_string_pretty(&overridden_mods) {
+        let _ = fs::write(&overridden_file, serialized);
+    }
+
     // Record in `.user-mods.json`
     let user_mods_file = instance_dir.join(".user-mods.json");
     let mut user_mods: HashSet<String> = fs::read_to_string(&user_mods_file)
@@ -740,6 +903,9 @@ pub async fn install_modrinth_mod(
 
     Ok(InstalledModEntry {
         filename: target_file.filename.clone(),
+        display_name: disp_name,
+        mod_version: ver_str,
+        mod_id,
         enabled: true,
         is_user_mod: true,
         size_kb,
@@ -756,6 +922,12 @@ pub fn list_installed_mods(instance_dir: &Path) -> Result<Vec<InstalledModEntry>
 
     let manifest_mods_file = instance_dir.join(".manifest-mods.json");
     let manifest_mods: HashSet<String> = fs::read_to_string(&manifest_mods_file)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    let overridden_file = instance_dir.join(".overridden-manifest-mods.json");
+    let overridden_mods: HashSet<String> = fs::read_to_string(&overridden_file)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
@@ -792,11 +964,22 @@ pub fn list_installed_mods(instance_dir: &Path) -> Result<Vec<InstalledModEntry>
             }
             let enabled = !fname.ends_with(".disabled");
             let base_name = fname.trim_end_matches(".disabled");
+
+            // If this was an old manifest mod overridden by a user install, prune it from disk and skip
+            if cat == "mods" && overridden_mods.contains(base_name) && manifest_mods.contains(base_name) {
+                let _ = fs::remove_file(&path);
+                continue;
+            }
+
             let is_user_mod = cat != "mods" || user_mods.contains(base_name) || !manifest_mods.contains(base_name);
             let size_kb = entry.metadata().map(|m| m.len() / 1024).unwrap_or(0);
+            let (display_name, mod_version, mod_id) = extract_metadata_from_archive(&path);
 
             list.push(InstalledModEntry {
                 filename: fname,
+                display_name,
+                mod_version,
+                mod_id,
                 enabled,
                 is_user_mod,
                 size_kb,
@@ -805,12 +988,37 @@ pub fn list_installed_mods(instance_dir: &Path) -> Result<Vec<InstalledModEntry>
         }
     }
 
+    // Deduplicate by mod_id (if both user mod and manifest mod existed with same mod_id, prioritize user mod)
+    let mut seen_ids: HashSet<String> = HashSet::new();
+    let mut deduped: Vec<InstalledModEntry> = Vec::with_capacity(list.len());
+
     list.sort_by(|a, b| {
         b.is_user_mod
             .cmp(&a.is_user_mod)
-            .then_with(|| a.filename.to_lowercase().cmp(&b.filename.to_lowercase()))
+            .then_with(|| b.enabled.cmp(&a.enabled))
+            .then_with(|| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()))
     });
-    Ok(list)
+
+    for item in list {
+        if let Some(id) = &item.mod_id {
+            if seen_ids.contains(id) {
+                // If a duplicate mod file was found on disk, remove the weaker one
+                let sub = &item.category;
+                let path = instance_dir.join(sub).join(&item.filename);
+                let _ = fs::remove_file(path);
+                continue;
+            }
+            seen_ids.insert(id.clone());
+        }
+        deduped.push(item);
+    }
+
+    deduped.sort_by(|a, b| {
+        b.is_user_mod
+            .cmp(&a.is_user_mod)
+            .then_with(|| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()))
+    });
+    Ok(deduped)
 }
 
 pub fn toggle_or_delete_installed_mod(
@@ -1334,6 +1542,12 @@ where
     }
 
     // 2. Hash check all expected files and build differential download queue
+    let overridden_file = instance_dir.join(".overridden-manifest-mods.json");
+    let overridden_mods: HashSet<String> = fs::read_to_string(&overridden_file)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
     let mut expected_mod_filenames = HashSet::new();
     let mut download_queue = Vec::new();
     let total_entries = all_files.len();
@@ -1344,6 +1558,14 @@ where
             if first_comp.as_os_str() == "mods" {
                 if let Some(fname) = safe_rel.file_name() {
                     expected_mod_filenames.insert(fname.to_string_lossy().to_string());
+                }
+            }
+        }
+
+        if keep_user_mods {
+            if let Some(fname) = safe_rel.file_name().map(|n| n.to_string_lossy().to_string()) {
+                if overridden_mods.contains(&fname) {
+                    continue;
                 }
             }
         }
