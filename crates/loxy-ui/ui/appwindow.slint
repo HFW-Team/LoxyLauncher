@@ -2,7 +2,8 @@ import { McTheme, McButton } from "theme.slint";
 import {
     ServerStatusData, AccountData, ModpackData, ConfigData,
     DetectedJavaData, ProgressData, LogEntryData, ModHitData,
-    ModVersionData, InstalledModData, StoredAccountData, CapeData
+    ModVersionData, InstalledModData, StoredAccountData, CapeData,
+    SkinPresetData
 } from "models.slint";
 import { AccountPill, ServerStatusPanel, ProfileTile } from "components/cards.slint";
 import { AuthDialog } from "dialogs/auth.slint";
@@ -103,11 +104,14 @@ export component MainWindow inherits Window {
     // Skin Dialog Properties
     in property <image> skin-preview-image;
     in property <string> skin-active-variant: "CLASSIC";
+    in-out property <string> skin-staged-variant: "CLASSIC";
     in property <string> skin-selected-path: "";
     in property <[CapeData]> skin-capes: [];
     in property <string> skin-active-cape-id: "";
+    in-out property <string> skin-staged-cape-id: "";
+    in property <[SkinPresetData]> skin-presets: [];
     in property <string> skin-status: "";
-    in property <bool> skin-is-uploading: false;
+    in property <bool> skin-is-saving: false;
 
     // Accounts Dialog Properties
     in property <[StoredAccountData]> all-accounts: [];
@@ -189,10 +193,12 @@ export component MainWindow inherits Window {
     callback skin-reset-view();
     callback skin-select-file();
     callback skin-set-variant(string);
-    callback skin-upload();
+    callback skin-select-cape(string);
+    callback skin-save-to-mojang();
     callback skin-reset();
-    callback skin-equip-cape(string);
-    callback skin-unequip-cape();
+    callback skin-save-preset(string);
+    callback skin-load-preset(string);
+    callback skin-delete-preset(string);
 
     // Main Root Layout
     VerticalLayout {
@@ -894,19 +900,24 @@ export component MainWindow inherits Window {
         preview-image: root.skin-preview-image;
         username: root.account.username;
         active-variant: root.skin-active-variant;
+        staged-variant <=> root.skin-staged-variant;
         selected-skin-path: root.skin-selected-path;
         capes: root.skin-capes;
         active-cape-id: root.skin-active-cape-id;
+        staged-cape-id <=> root.skin-staged-cape-id;
+        presets: root.skin-presets;
         status-text: root.skin-status;
-        is-uploading: root.skin-is-uploading;
+        is-saving: root.skin-is-saving;
         close-clicked => { root.skin-open = false; }
         rotate-character(dx, dy) => { root.skin-rotate(dx, dy); }
         reset-view-clicked => { root.skin-reset-view(); }
         select-skin-file-clicked => { root.skin-select-file(); }
         set-variant-clicked(v) => { root.skin-set-variant(v); }
-        upload-skin-clicked => { root.skin-upload(); }
+        select-cape-clicked(cid) => { root.skin-select-cape(cid); }
+        save-to-mojang-clicked => { root.skin-save-to-mojang(); }
         reset-skin-clicked => { root.skin-reset(); }
-        equip-cape-clicked(cid) => { root.skin-equip-cape(cid); }
-        unequip-cape-clicked => { root.skin-unequip-cape(); }
+        save-preset-clicked(name) => { root.skin-save-preset(name); }
+        load-preset-clicked(id) => { root.skin-load-preset(id); }
+        delete-preset-clicked(id) => { root.skin-delete-preset(id); }
     }
 }

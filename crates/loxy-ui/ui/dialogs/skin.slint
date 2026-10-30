@@ -1,26 +1,34 @@
 import { McTheme, McButton, McIconButton } from "../theme.slint";
-import { CapeData } from "../models.slint";
+import { CapeData, SkinPresetData } from "../models.slint";
+import { ScrollView } from "std-widgets.slint";
 
 export component SkinDialog inherits Rectangle {
     in property <bool> is-open: false;
     in property <image> preview-image;
     in property <string> username: "";
-    in property <string> active-variant: "CLASSIC"; // "CLASSIC" or "SLIM"
+    in property <string> active-variant: "CLASSIC";
+    in-out property <string> staged-variant: "CLASSIC";
     in property <string> selected-skin-path: "";
     in property <[CapeData]> capes: [];
     in property <string> active-cape-id: "";
+    in-out property <string> staged-cape-id: "";
+    in property <[SkinPresetData]> presets: [];
+    in-out property <string> new-preset-name: "";
+    in-out property <int> active-tab: 0; // 0 = Customize, 1 = Presets
     in property <string> status-text: "";
-    in property <bool> is-uploading: false;
+    in property <bool> is-saving: false;
 
     callback close-clicked();
     callback rotate-character(length, length);
     callback reset-view-clicked();
     callback select-skin-file-clicked();
     callback set-variant-clicked(string);
-    callback upload-skin-clicked();
+    callback select-cape-clicked(string);
+    callback save-to-mojang-clicked();
     callback reset-skin-clicked();
-    callback equip-cape-clicked(string);
-    callback unequip-cape-clicked();
+    callback save-preset-clicked(string);
+    callback load-preset-clicked(string);
+    callback delete-preset-clicked(string);
 
     visible: root.is-open;
     background: #000000dd;
@@ -30,8 +38,8 @@ export component SkinDialog inherits Rectangle {
     }
 
     Rectangle {
-        width: 700px;
-        height: 520px;
+        width: 760px;
+        height: 550px;
         background: McTheme.panel-bg;
         border-color: McTheme.panel-border;
         border-width: 2px;
@@ -55,9 +63,33 @@ export component SkinDialog inherits Rectangle {
                     }
                 }
 
-                McIconButton {
-                    text: "X";
-                    clicked => { root.close-clicked(); }
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    McButton {
+                        text: "CUSTOMIZE";
+                        primary: root.active-tab == 0;
+                        font-size: 11px;
+                        h-padding: 12px;
+                        v-padding: 5px;
+                        clicked => { root.active-tab = 0; }
+                    }
+
+                    McButton {
+                        text: "SAVED PRESETS (" + root.presets.length + ")";
+                        primary: root.active-tab == 1;
+                        font-size: 11px;
+                        h-padding: 12px;
+                        v-padding: 5px;
+                        clicked => { root.active-tab = 1; }
+                    }
+
+                    McIconButton {
+                        width: 26px;
+                        height: 26px;
+                        text: "X";
+                        clicked => { root.close-clicked(); }
+                    }
                 }
             }
 
@@ -71,7 +103,7 @@ export component SkinDialog inherits Rectangle {
                 spacing: 16px;
                 vertical-stretch: 1;
 
-                // LEFT: 3D Viewport
+                // LEFT: 3D Viewport (width 290px)
                 VerticalLayout {
                     width: 290px;
                     spacing: 8px;
@@ -132,19 +164,19 @@ export component SkinDialog inherits Rectangle {
                     }
                 }
 
-                // RIGHT: Skin & Cape Management Controls
-                VerticalLayout {
+                // RIGHT PANEL
+                if root.active-tab == 0 : VerticalLayout {
                     horizontal-stretch: 1;
-                    spacing: 12px;
+                    spacing: 10px;
 
-                    // Section 1: Skin File & Model
+                    // Section 1: Skin File & Model Variant
                     Rectangle {
                         background: McTheme.inset-bg;
                         border-color: McTheme.inset-border;
                         border-width: 1px;
 
                         VerticalLayout {
-                            padding: 12px;
+                            padding: 10px;
                             spacing: 8px;
 
                             Text {
@@ -158,7 +190,7 @@ export component SkinDialog inherits Rectangle {
                             HorizontalLayout {
                                 spacing: 8px;
                                 Text {
-                                    text: "Model Variant:";
+                                    text: "Arm Model:";
                                     font-size: 11px;
                                     color: #cccccc;
                                     vertical-alignment: center;
@@ -166,20 +198,26 @@ export component SkinDialog inherits Rectangle {
 
                                 McButton {
                                     text: "CLASSIC (4px)";
-                                    primary: root.active-variant == "CLASSIC";
+                                    primary: root.staged-variant == "CLASSIC";
                                     font-size: 10px;
                                     h-padding: 8px;
                                     v-padding: 4px;
-                                    clicked => { root.set-variant-clicked("CLASSIC"); }
+                                    clicked => {
+                                        root.staged-variant = "CLASSIC";
+                                        root.set-variant-clicked("CLASSIC");
+                                    }
                                 }
 
                                 McButton {
                                     text: "SLIM (3px)";
-                                    primary: root.active-variant == "SLIM";
+                                    primary: root.staged-variant == "SLIM";
                                     font-size: 10px;
                                     h-padding: 8px;
                                     v-padding: 4px;
-                                    clicked => { root.set-variant-clicked("SLIM"); }
+                                    clicked => {
+                                        root.staged-variant = "SLIM";
+                                        root.set-variant-clicked("SLIM");
+                                    }
                                 }
                             }
 
@@ -203,35 +241,10 @@ export component SkinDialog inherits Rectangle {
                                     horizontal-stretch: 1;
                                 }
                             }
-
-                            // Upload / Reset Buttons
-                            HorizontalLayout {
-                                spacing: 8px;
-
-                                McButton {
-                                    text: root.is-uploading ? "UPLOADING..." : "UPLOAD SKIN TO MOJANG";
-                                    primary: true;
-                                    disabled: root.is-uploading || root.selected-skin-path == "";
-                                    font-size: 10px;
-                                    h-padding: 10px;
-                                    v-padding: 5px;
-                                    clicked => { root.upload-skin-clicked(); }
-                                }
-
-                                McButton {
-                                    text: "RESET SKIN";
-                                    danger: true;
-                                    disabled: root.is-uploading;
-                                    font-size: 10px;
-                                    h-padding: 8px;
-                                    v-padding: 5px;
-                                    clicked => { root.reset-skin-clicked(); }
-                                }
-                            }
                         }
                     }
 
-                    // Section 2: Capes
+                    // Section 2: Capes (Bounded ScrollView with Cape Preview Icons)
                     Rectangle {
                         vertical-stretch: 1;
                         background: McTheme.inset-bg;
@@ -239,93 +252,478 @@ export component SkinDialog inherits Rectangle {
                         border-width: 1px;
 
                         VerticalLayout {
-                            padding: 12px;
-                            spacing: 8px;
+                            padding: 10px;
+                            spacing: 6px;
 
-                            Text {
-                                text: "2. OFFICIAL CAPES (" + root.capes.length + " OWNED)";
-                                font-size: 11px;
-                                font-weight: 700;
-                                color: #80cbc4;
-                            }
+                            HorizontalLayout {
+                                alignment: space-between;
+                                Text {
+                                    text: "2. CAPE (" + root.capes.length + " OWNED)";
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    color: #80cbc4;
+                                }
 
-                            if root.capes.length == 0 : Text {
-                                text: "No official capes registered on this account.";
-                                font-size: 11px;
-                                color: #777777;
-                                vertical-alignment: center;
-                                height: 36px;
-                            }
-
-                            for cape in root.capes : Rectangle {
-                                height: 34px;
-                                background: cape.id == root.active-cape-id ? #1b301c : #181818;
-                                border-color: cape.id == root.active-cape-id ? #4caf50 : #2a2a2a;
-                                border-width: 1px;
-
-                                HorizontalLayout {
-                                    padding-left: 10px;
-                                    padding-right: 10px;
-                                    spacing: 8px;
-                                    alignment: space-between;
-
-                                    VerticalLayout {
-                                        alignment: center;
-                                        Text {
-                                            text: cape.alias != "" ? cape.alias : "Official Cape";
-                                            font-size: 11px;
-                                            font-weight: 700;
-                                            color: #ffffff;
-                                        }
-                                    }
-
-                                    VerticalLayout {
-                                        alignment: center;
-                                        McButton {
-                                            text: cape.id == root.active-cape-id ? "✓ EQUIPPED" : "EQUIP";
-                                            primary: cape.id != root.active-cape-id;
-                                            disabled: cape.id == root.active-cape-id;
-                                            font-size: 9px;
-                                            h-padding: 8px;
-                                            v-padding: 4px;
-                                            clicked => { root.equip-cape-clicked(cape.id); }
-                                        }
-                                    }
+                                Text {
+                                    text: "Click to preview instantly";
+                                    font-size: 9px;
+                                    color: #777777;
+                                    vertical-alignment: center;
                                 }
                             }
 
-                            if root.active-cape-id != "" : HorizontalLayout {
-                                alignment: start;
-                                McButton {
-                                    text: "UNEQUIP CURRENT CAPE";
-                                    font-size: 9px;
-                                    h-padding: 8px;
-                                    v-padding: 4px;
-                                    clicked => { root.unequip-cape-clicked(); }
+                            Rectangle {
+                                vertical-stretch: 1;
+                                background: #141414;
+                                border-color: #262626;
+                                border-width: 1px;
+                                clip: true;
+
+                                ScrollView {
+                                    width: 100%;
+                                    height: 100%;
+
+                                    VerticalLayout {
+                                        padding: 4px;
+                                        spacing: 4px;
+
+                                        // NONE / UNEQUIP ROW
+                                        Rectangle {
+                                            height: 34px;
+                                            background: root.staged-cape-id == "" ? #1e281e : (none-touch.has-hover ? #222222 : #181818);
+                                            border-color: root.staged-cape-id == "" ? #4caf50 : #2c2c2c;
+                                            border-width: 1px;
+
+                                            none-touch := TouchArea {
+                                                mouse-cursor: pointer;
+                                                clicked => { root.select-cape-clicked(""); }
+                                            }
+
+                                            HorizontalLayout {
+                                                padding-left: 8px;
+                                                padding-right: 10px;
+                                                spacing: 10px;
+
+                                                Rectangle {
+                                                    width: 18px;
+                                                    height: 26px;
+                                                    background: #252525;
+                                                    border-color: #383838;
+                                                    border-width: 1px;
+                                                    Text {
+                                                        width: 100%;
+                                                        height: 100%;
+                                                        text: "✕";
+                                                        font-size: 11px;
+                                                        color: #777777;
+                                                        horizontal-alignment: center;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
+
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    horizontal-stretch: 1;
+                                                    Text {
+                                                        text: "None (Unequip Cape)";
+                                                        font-size: 11px;
+                                                        font-weight: 700;
+                                                        color: root.staged-cape-id == "" ? #81c784 : #aaaaaa;
+                                                    }
+                                                }
+
+                                                if root.staged-cape-id == "" : VerticalLayout {
+                                                    alignment: center;
+                                                    Text {
+                                                        text: "SELECTED";
+                                                        font-size: 9px;
+                                                        font-weight: 700;
+                                                        color: #4caf50;
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        // CAPES LIST
+                                        for cape in root.capes : Rectangle {
+                                            height: 34px;
+                                            background: cape.id == root.staged-cape-id ? #1b301c : (cape-row-touch.has-hover ? #222222 : #181818);
+                                            border-color: cape.id == root.staged-cape-id ? #4caf50 : #2c2c2c;
+                                            border-width: 1px;
+
+                                            cape-row-touch := TouchArea {
+                                                mouse-cursor: pointer;
+                                                clicked => { root.select-cape-clicked(cape.id); }
+                                            }
+
+                                            HorizontalLayout {
+                                                padding-left: 8px;
+                                                padding-right: 10px;
+                                                spacing: 10px;
+
+                                                // Cape Preview Icon
+                                                Rectangle {
+                                                    width: 18px;
+                                                    height: 26px;
+                                                    background: #111111;
+                                                    border-color: #383838;
+                                                    border-width: 1px;
+
+                                                    if cape.has-icon : Image {
+                                                        width: 100%;
+                                                        height: 100%;
+                                                        source: cape.icon;
+                                                        image-fit: contain;
+                                                    }
+                                                    if !cape.has-icon : Text {
+                                                        width: 100%;
+                                                        height: 100%;
+                                                        text: "🎽";
+                                                        font-size: 12px;
+                                                        horizontal-alignment: center;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
+
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    horizontal-stretch: 1;
+                                                    Text {
+                                                        text: cape.alias != "" ? cape.alias : "Official Cape";
+                                                        font-size: 11px;
+                                                        font-weight: 700;
+                                                        color: cape.id == root.staged-cape-id ? #81c784 : #ffffff;
+                                                        overflow: elide;
+                                                    }
+                                                }
+
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    HorizontalLayout {
+                                                        spacing: 6px;
+                                                        if cape.id == root.active-cape-id : Text {
+                                                            text: "ACTIVE";
+                                                            font-size: 9px;
+                                                            font-weight: 700;
+                                                            color: #64b5f6;
+                                                            vertical-alignment: center;
+                                                        }
+                                                        if cape.id == root.staged-cape-id : Text {
+                                                            text: "SELECTED";
+                                                            font-size: 9px;
+                                                            font-weight: 700;
+                                                            color: #4caf50;
+                                                            vertical-alignment: center;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
 
-                    // Status Message
-                    if root.status-text != "" : Text {
-                        text: root.status-text;
-                        font-size: 11px;
-                        font-weight: 700;
-                        color: #81c784;
-                        overflow: elide;
+                    // Section 3: Apply to Mojang & Reset Actions
+                    HorizontalLayout {
+                        spacing: 8px;
+
+                        McButton {
+                            text: root.is-saving ? "APPLYING TO MOJANG..." : "SAVE & APPLY TO MOJANG";
+                            primary: true;
+                            disabled: root.is-saving;
+                            font-size: 10px;
+                            h-padding: 14px;
+                            v-padding: 6px;
+                            clicked => { root.save-to-mojang-clicked(); }
+                        }
+
+                        McButton {
+                            text: "RESET SKIN";
+                            danger: true;
+                            disabled: root.is-saving;
+                            font-size: 10px;
+                            h-padding: 10px;
+                            v-padding: 6px;
+                            clicked => { root.reset-skin-clicked(); }
+                        }
+                    }
+                }
+
+                // TAB 1: PRESETS (SKIN + CAPE COMBOS)
+                if root.active-tab == 1 : VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 10px;
+
+                    // Create Preset Bar
+                    Rectangle {
+                        background: McTheme.inset-bg;
+                        border-color: McTheme.inset-border;
+                        border-width: 1px;
+
+                        VerticalLayout {
+                            padding: 10px;
+                            spacing: 8px;
+
+                            Text {
+                                text: "SAVE CURRENT SKIN & CAPE COMBO";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: #80cbc4;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 8px;
+
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                    height: 30px;
+                                    background: #141414;
+                                    border-color: preset-inp.has-focus ? #66bb6a : #3a3a3a;
+                                    border-width: 1px;
+
+                                    preset-inp := TextInput {
+                                        x: 8px;
+                                        width: parent.width - 16px;
+                                        height: 100%;
+                                        text <=> root.new-preset-name;
+                                        font-size: 11px;
+                                        color: #ffffff;
+                                        vertical-alignment: center;
+                                        single-line: true;
+                                    }
+
+                                    if root.new-preset-name == "" : Text {
+                                        x: 8px;
+                                        width: parent.width - 16px;
+                                        height: 100%;
+                                        text: "Enter preset name (e.g. Favorite Cape Combo)...";
+                                        font-size: 11px;
+                                        color: #666666;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                McButton {
+                                    text: "SAVE AS PRESET";
+                                    primary: true;
+                                    disabled: root.new-preset-name == "";
+                                    font-size: 10px;
+                                    h-padding: 10px;
+                                    v-padding: 5px;
+                                    clicked => {
+                                        root.save-preset-clicked(root.new-preset-name);
+                                        root.new-preset-name = "";
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Saved Presets List
+                    Rectangle {
+                        vertical-stretch: 1;
+                        background: McTheme.inset-bg;
+                        border-color: McTheme.inset-border;
+                        border-width: 1px;
+                        clip: true;
+
+                        ScrollView {
+                            width: 100%;
+                            height: 100%;
+
+                            VerticalLayout {
+                                padding: 8px;
+                                spacing: 6px;
+
+                                if root.presets.length == 0 : Text {
+                                    height: 60px;
+                                    text: "No presets saved yet. Customize your skin and cape, then save a preset above!";
+                                    font-size: 11px;
+                                    color: #777777;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+
+                                for preset in root.presets : Rectangle {
+                                    height: 56px;
+                                    background: #1a1a1a;
+                                    border-color: #333333;
+                                    border-width: 1px;
+
+                                    HorizontalLayout {
+                                        padding-left: 10px;
+                                        padding-right: 10px;
+                                        spacing: 12px;
+
+                                        // Combined Skin Head + Cape Visual Preview Box
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Rectangle {
+                                                width: 58px;
+                                                height: 38px;
+                                                background: #121212;
+                                                border-color: #2c2c2c;
+                                                border-width: 1px;
+
+                                                HorizontalLayout {
+                                                    alignment: center;
+                                                    spacing: 4px;
+
+                                                    // Skin Head Icon
+                                                    Rectangle {
+                                                        width: 28px;
+                                                        height: 28px;
+                                                        background: #1e1e1e;
+                                                        border-color: #3a3a3a;
+                                                        border-width: 1px;
+
+                                                        if preset.has-skin-icon : Image {
+                                                            width: 100%;
+                                                            height: 100%;
+                                                            source: preset.skin-icon;
+                                                            image-rendering: pixelated;
+                                                        }
+                                                        if !preset.has-skin-icon : Text {
+                                                            width: 100%;
+                                                            height: 100%;
+                                                            text: "🧑";
+                                                            font-size: 14px;
+                                                            horizontal-alignment: center;
+                                                            vertical-alignment: center;
+                                                        }
+                                                    }
+
+                                                    // Cape Preview Icon
+                                                    Rectangle {
+                                                        width: 16px;
+                                                        height: 24px;
+                                                        background: #191919;
+                                                        border-color: #333333;
+                                                        border-width: 1px;
+
+                                                        if preset.has-cape-icon : Image {
+                                                            width: 100%;
+                                                            height: 100%;
+                                                            source: preset.cape-icon;
+                                                            image-rendering: pixelated;
+                                                        }
+                                                        if !preset.has-cape-icon : Text {
+                                                            width: 100%;
+                                                            height: 100%;
+                                                            text: "—";
+                                                            font-size: 10px;
+                                                            color: #555555;
+                                                            horizontal-alignment: center;
+                                                            vertical-alignment: center;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        // Preset Details Column
+                                        VerticalLayout {
+                                            alignment: center;
+                                            spacing: 4px;
+                                            horizontal-stretch: 1;
+
+                                            Text {
+                                                text: preset.name;
+                                                font-size: 13px;
+                                                font-weight: 700;
+                                                color: #ffd54f;
+                                                overflow: elide;
+                                            }
+
+                                            HorizontalLayout {
+                                                spacing: 6px;
+                                                alignment: start;
+
+                                                Rectangle {
+                                                    height: 16px;
+                                                    background: #232d25;
+                                                    border-color: #388e3c;
+                                                    border-width: 1px;
+                                                    Text {
+                                                        text: " " + preset.variant + " ";
+                                                        font-size: 9px;
+                                                        font-weight: 700;
+                                                        color: #81c784;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
+
+                                                Rectangle {
+                                                    height: 16px;
+                                                    background: preset.cape-id != "" ? #1a2733 : #222222;
+                                                    border-color: preset.cape-id != "" ? #2b5c8f : #3a3a3a;
+                                                    border-width: 1px;
+                                                    Text {
+                                                        text: preset.cape-id != "" ? (" 🎽 " + preset.cape-alias + " ") : " No Cape ";
+                                                        font-size: 9px;
+                                                        font-weight: 700;
+                                                        color: preset.cape-id != "" ? #90caf9 : #888888;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        // Action Buttons (PREVIEW & DELETE)
+                                        VerticalLayout {
+                                            alignment: center;
+                                            HorizontalLayout {
+                                                spacing: 6px;
+                                                alignment: end;
+
+                                                McButton {
+                                                    text: "PREVIEW";
+                                                    primary: true;
+                                                    font-size: 10px;
+                                                    h-padding: 10px;
+                                                    v-padding: 5px;
+                                                    clicked => { root.load-preset-clicked(preset.id); }
+                                                }
+
+                                                McButton {
+                                                    text: "DELETE";
+                                                    danger: true;
+                                                    font-size: 10px;
+                                                    h-padding: 8px;
+                                                    v-padding: 5px;
+                                                    clicked => { root.delete-preset-clicked(preset.id); }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
 
             // Footer
             HorizontalLayout {
-                alignment: end;
+                alignment: space-between;
+
+                VerticalLayout {
+                    alignment: center;
+                    if root.status-text != "" : Text {
+                        text: root.status-text;
+                        font-size: 11px;
+                        font-weight: 700;
+                        color: #81c784;
+                    }
+                }
+
                 McButton {
                     text: "CLOSE";
                     font-size: 11px;
                     h-padding: 16px;
-                    v-padding: 7px;
+                    v-padding: 6px;
                     clicked => { root.close-clicked(); }
                 }
             }

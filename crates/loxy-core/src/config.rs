@@ -94,7 +94,9 @@ impl LauncherConfig {
     }
 
     pub fn system_memory_info() -> SystemMemoryInfo {
-        let mut sys = System::new();
+        let mut sys = System::new_with_specifics(
+            sysinfo::RefreshKind::nothing().with_memory(sysinfo::MemoryRefreshKind::everything()),
+        );
         sys.refresh_memory();
         let total_mb = (sys.total_memory() / (1024 * 1024)) as u32;
         let total_ram_mb = if total_mb < 4096 { 8192 } else { total_mb };

@@ -14,8 +14,8 @@ struct Vertex {
 
 struct Quad {
     v: [Vertex; 4],
+    normal: [f32; 3],
     is_cape: bool,
-    is_outer: bool,
 }
 
 pub struct Character3DScene {
@@ -41,7 +41,6 @@ fn add_box_quads(
     // u, v, w, h for 6 faces: [top, bottom, right, front, left, back]
     uvs: [[f32; 4]; 6],
     is_cape: bool,
-    is_outer: bool,
 ) {
     let [x0, y0, z0] = min;
     let [x1, y1, z1] = max;
@@ -50,26 +49,26 @@ fn add_box_quads(
     let [u, v, w, h] = uvs[0];
     quads.push(Quad {
         v: [
-            Vertex { pos: [x0, y1, z1], uv: [u, v] },
-            Vertex { pos: [x1, y1, z1], uv: [u + w, v] },
-            Vertex { pos: [x1, y1, z0], uv: [u + w, v + h] },
-            Vertex { pos: [x0, y1, z0], uv: [u, v + h] },
+            Vertex { pos: [x0, y1, z0], uv: [u, v] },
+            Vertex { pos: [x1, y1, z0], uv: [u + w, v] },
+            Vertex { pos: [x1, y1, z1], uv: [u + w, v + h] },
+            Vertex { pos: [x0, y1, z1], uv: [u, v + h] },
         ],
+        normal: [0.0, 1.0, 0.0],
         is_cape,
-        is_outer,
     });
 
     // Face 1: Bottom (y = min)
     let [u, v, w, h] = uvs[1];
     quads.push(Quad {
         v: [
-            Vertex { pos: [x0, y0, z0], uv: [u, v] },
-            Vertex { pos: [x1, y0, z0], uv: [u + w, v] },
-            Vertex { pos: [x1, y0, z1], uv: [u + w, v + h] },
-            Vertex { pos: [x0, y0, z1], uv: [u, v + h] },
+            Vertex { pos: [x0, y0, z1], uv: [u, v] },
+            Vertex { pos: [x1, y0, z1], uv: [u + w, v] },
+            Vertex { pos: [x1, y0, z0], uv: [u + w, v + h] },
+            Vertex { pos: [x0, y0, z0], uv: [u, v + h] },
         ],
+        normal: [0.0, -1.0, 0.0],
         is_cape,
-        is_outer,
     });
 
     // Face 2: Right (x = min)
@@ -81,8 +80,8 @@ fn add_box_quads(
             Vertex { pos: [x0, y0, z1], uv: [u + w, v + h] },
             Vertex { pos: [x0, y0, z0], uv: [u, v + h] },
         ],
+        normal: [-1.0, 0.0, 0.0],
         is_cape,
-        is_outer,
     });
 
     // Face 3: Front (z = max)
@@ -94,8 +93,8 @@ fn add_box_quads(
             Vertex { pos: [x1, y0, z1], uv: [u + w, v + h] },
             Vertex { pos: [x0, y0, z1], uv: [u, v + h] },
         ],
+        normal: [0.0, 0.0, 1.0],
         is_cape,
-        is_outer,
     });
 
     // Face 4: Left (x = max)
@@ -107,8 +106,8 @@ fn add_box_quads(
             Vertex { pos: [x1, y0, z0], uv: [u + w, v + h] },
             Vertex { pos: [x1, y0, z1], uv: [u, v + h] },
         ],
+        normal: [1.0, 0.0, 0.0],
         is_cape,
-        is_outer,
     });
 
     // Face 5: Back (z = min)
@@ -120,8 +119,8 @@ fn add_box_quads(
             Vertex { pos: [x0, y0, z0], uv: [u + w, v + h] },
             Vertex { pos: [x1, y0, z0], uv: [u, v + h] },
         ],
+        normal: [0.0, 0.0, -1.0],
         is_cape,
-        is_outer,
     });
 }
 
@@ -135,16 +134,16 @@ pub fn render_minecraft_character(
     let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
     let mut z_buffer = vec![f32::NEG_INFINITY; (width * height) as usize];
 
-    // Clear background to transparent / dark vignette
+    // Clear background to transparent
     let buf_slice = buffer.make_mut_bytes();
     for pixel in buf_slice.chunks_exact_mut(4) {
         pixel[0] = 0;
         pixel[1] = 0;
         pixel[2] = 0;
-        pixel[3] = 0; // transparent
+        pixel[3] = 0;
     }
 
-    let mut quads: Vec<Quad> = Vec::with_capacity(70);
+    let mut quads: Vec<Quad> = Vec::with_capacity(80);
 
     // 1. HEAD (8x8x8)
     add_box_quads(
@@ -159,7 +158,6 @@ pub fn render_minecraft_character(
             [16.0, 8.0, 8.0, 8.0],  // Left
             [24.0, 8.0, 8.0, 8.0],  // Back
         ],
-        false,
         false,
     );
 
@@ -177,7 +175,6 @@ pub fn render_minecraft_character(
             [56.0, 8.0, 8.0, 8.0],
         ],
         false,
-        true,
     );
 
     // 2. TORSO (8x12x4)
@@ -193,7 +190,6 @@ pub fn render_minecraft_character(
             [28.0, 20.0, 4.0, 12.0],
             [32.0, 20.0, 8.0, 12.0],
         ],
-        false,
         false,
     );
 
@@ -211,7 +207,6 @@ pub fn render_minecraft_character(
             [32.0, 36.0, 8.0, 12.0],
         ],
         false,
-        true,
     );
 
     // 3. RIGHT ARM
@@ -233,7 +228,6 @@ pub fn render_minecraft_character(
             [48.0 + arm_uv_w, 20.0, arm_uv_w, 12.0],
         ],
         false,
-        false,
     );
 
     // RIGHT SLEEVE
@@ -250,7 +244,6 @@ pub fn render_minecraft_character(
             [48.0 + arm_uv_w, 36.0, arm_uv_w, 12.0],
         ],
         false,
-        true,
     );
 
     // 4. LEFT ARM
@@ -266,7 +259,6 @@ pub fn render_minecraft_character(
             [36.0 + arm_uv_w, 52.0, 4.0, 12.0],
             [40.0 + arm_uv_w, 52.0, arm_uv_w, 12.0],
         ],
-        false,
         false,
     );
 
@@ -284,7 +276,6 @@ pub fn render_minecraft_character(
             [56.0 + arm_uv_w, 52.0, arm_uv_w, 12.0],
         ],
         false,
-        true,
     );
 
     // 5. RIGHT LEG (4x12x4)
@@ -300,7 +291,6 @@ pub fn render_minecraft_character(
             [8.0, 20.0, 4.0, 12.0],
             [12.0, 20.0, 4.0, 12.0],
         ],
-        false,
         false,
     );
 
@@ -318,7 +308,6 @@ pub fn render_minecraft_character(
             [12.0, 36.0, 4.0, 12.0],
         ],
         false,
-        true,
     );
 
     // 6. LEFT LEG (4x12x4)
@@ -334,7 +323,6 @@ pub fn render_minecraft_character(
             [24.0, 52.0, 4.0, 12.0],
             [28.0, 52.0, 4.0, 12.0],
         ],
-        false,
         false,
     );
 
@@ -352,7 +340,6 @@ pub fn render_minecraft_character(
             [12.0, 52.0, 4.0, 12.0],
         ],
         false,
-        true,
     );
 
     // 7. CAPE (if equipped)
@@ -365,13 +352,12 @@ pub fn render_minecraft_character(
             [
                 [1.0, 0.0, 10.0, 1.0],   // Top
                 [11.0, 0.0, 10.0, 1.0],  // Bottom
-                [0.0, 1.0, 1.0, 16.0],   // Right
-                [11.0, 1.0, 1.0, 16.0],  // Front (inner)
-                [1.0, 1.0, 10.0, 16.0],  // Back (outer pattern)
-                [12.0, 1.0, 10.0, 16.0], // Left
+                [0.0, 1.0, 1.0, 16.0],   // Right edge
+                [11.0, 1.0, 10.0, 16.0], // Front (inner face against back)
+                [21.0, 1.0, 1.0, 16.0],  // Left edge
+                [1.0, 1.0, 10.0, 16.0],  // Back (outer face seen from behind)
             ],
             true,
-            false,
         );
     }
 
@@ -381,7 +367,7 @@ pub fn render_minecraft_character(
     let cos_pitch = scene.pitch.cos();
     let sin_pitch = scene.pitch.sin();
 
-    let light_dir = [0.25f32, 0.75f32, 0.6f32];
+    let light_dir = [0.3f32, 0.7f32, 0.65f32];
     let light_len = (light_dir[0] * light_dir[0]
         + light_dir[1] * light_dir[1]
         + light_dir[2] * light_dir[2])
@@ -394,14 +380,14 @@ pub fn render_minecraft_character(
 
     let center_x = width as f32 / 2.0;
     let center_y = height as f32 / 2.0;
-    let scale = (height as f32) / 36.0; // scales 32 units tall character nicely
+    // Scale for character: 32 units tall, centered at y = 17.5
+    let scale = (height as f32) / 38.0;
 
     let (skin_w, skin_h) = skin_img.dimensions();
     let (cape_w, cape_h) = cape_img
         .map(|c| c.dimensions())
         .unwrap_or((64, 32));
 
-    // Sort quads roughly back-to-front by average transformed depth for smooth blending
     struct ProjectedQuad<'a> {
         quad: &'a Quad,
         pts: [[f32; 3]; 4],
@@ -412,6 +398,19 @@ pub fn render_minecraft_character(
     let mut projected: Vec<ProjectedQuad> = Vec::with_capacity(quads.len());
 
     for quad in &quads {
+        // Rotate normal
+        let [nx0, ny0, nz0] = quad.normal;
+        let nx1 = nx0 * cos_yaw + nz0 * sin_yaw;
+        let nz1 = -nx0 * sin_yaw + nz0 * cos_yaw;
+        let ny2 = ny0 * cos_pitch - nz1 * sin_pitch;
+        let nz2 = ny0 * sin_pitch + nz1 * cos_pitch;
+        let nx2 = nx1;
+
+        // Backface culling: cull any face facing away from the camera
+        if nz2 <= 0.001 {
+            continue;
+        }
+
         let mut pts = [[0.0f32; 3]; 4];
         let mut sum_z = 0.0;
 
@@ -428,33 +427,7 @@ pub fn render_minecraft_character(
             sum_z += z2;
         }
 
-        // Calculate face normal
-        let e1 = [
-            pts[1][0] - pts[0][0],
-            pts[1][1] - pts[0][1],
-            pts[1][2] - pts[0][2],
-        ];
-        let e2 = [
-            pts[2][0] - pts[0][0],
-            pts[2][1] - pts[0][1],
-            pts[2][2] - pts[0][2],
-        ];
-        let mut nx = e1[1] * e2[2] - e1[2] * e2[1];
-        let mut ny = e1[2] * e2[0] - e1[0] * e2[2];
-        let mut nz = e1[0] * e2[1] - e1[1] * e2[0];
-        let n_len = (nx * nx + ny * ny + nz * nz).sqrt();
-        if n_len > 0.0001 {
-            nx /= n_len;
-            ny /= n_len;
-            nz /= n_len;
-        }
-
-        // Backface culling: if facing away from camera and not an outer/cape layer, skip
-        if nz <= 0.0 && !quad.is_outer && !quad.is_cape {
-            continue;
-        }
-
-        let dot = (nx * l_norm[0] + ny * l_norm[1] + nz * l_norm[2]).max(0.0);
+        let dot = (nx2 * l_norm[0] + ny2 * l_norm[1] + nz2 * l_norm[2]).max(0.0);
         let light = 0.55 + 0.45 * dot;
 
         projected.push(ProjectedQuad {
@@ -479,25 +452,26 @@ pub fn render_minecraft_character(
     for pq in projected {
         let quad = pq.quad;
         let p = pq.pts;
+        // Vertically centered at y = 17.5
         let scr = [
             [
                 center_x + p[0][0] * scale,
-                center_y - (p[0][1] - 16.0) * scale,
+                center_y - (p[0][1] - 17.5) * scale,
                 p[0][2],
             ],
             [
                 center_x + p[1][0] * scale,
-                center_y - (p[1][1] - 16.0) * scale,
+                center_y - (p[1][1] - 17.5) * scale,
                 p[1][2],
             ],
             [
                 center_x + p[2][0] * scale,
-                center_y - (p[2][1] - 16.0) * scale,
+                center_y - (p[2][1] - 17.5) * scale,
                 p[2][2],
             ],
             [
                 center_x + p[3][0] * scale,
-                center_y - (p[3][1] - 16.0) * scale,
+                center_y - (p[3][1] - 17.5) * scale,
                 p[3][2],
             ],
         ];

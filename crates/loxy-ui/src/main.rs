@@ -105,7 +105,7 @@ fn format_downloads(n: u64) -> String {
     }
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<()> {
     // 1. Force Pure Software Rendering to guarantee ~20-35MB RAM and 0 GPU/LLVM overhead
     std::env::set_var("SLINT_BACKEND", "winit-software");
@@ -1026,6 +1026,17 @@ async fn main() -> Result<()> {
     }
 
     // --- Skin & Cape Callbacks ---
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    struct SkinPresetItem {
+        id: String,
+        name: String,
+        skin_file: String,
+        variant: String,
+        cape_id: String,
+        cape_alias: String,
+        date_str: String,
+    }
+
     struct SkinViewState {
         scene: Character3DScene,
         skin_image: image::RgbaImage,
@@ -1033,8 +1044,11 @@ async fn main() -> Result<()> {
         selected_skin_path: String,
         selected_skin_bytes: Option<Vec<u8>>,
         active_variant: String,
+        staged_variant: String,
         active_cape_id: String,
+        staged_cape_id: String,
         capes: Vec<auth::PlayerCape>,
+        cape_textures: HashMap<String, image::RgbaImage>,
     }
 
     fn default_steve_skin() -> image::RgbaImage {
@@ -1078,6 +1092,117 @@ async fn main() -> Result<()> {
         img
     }
 
+    fn extract_cape_icon(cape_img: &image::RgbaImage) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
+        let (cw, ch) = cape_img.dimensions();
+        if cw < 12 || ch < 17 {
+            return None;
+        }
+        let sub = image::imageops::crop_imm(cape_img, 1, 1, 10, 16).to_image();
+        let scaled = image::imageops::resize(&sub, 18, 26, image::imageops::FilterType::Nearest);
+        let (w, h) = scaled.dimensions();
+        Some(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(scaled.as_raw(), w, h))
+    }
+
+    fn presets_dir() -> PathBuf {
+        LauncherConfig::base_app_dir().join("presets").join("skins")
+    }
+
+    fn presets_meta_path() -> PathBuf {
+        LauncherConfig::base_app_dir().join("skin_presets.json")
+    }
+
+    fn load_skin_presets() -> Vec<SkinPresetItem> {
+        let p = presets_meta_path();
+        if let Ok(content) = std::fs::read_to_string(&p) {
+            serde_json::from_str(&content).unwrap_or_default()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn save_skin_presets(presets: &[SkinPresetItem]) {
+        let p = presets_meta_path();
+        if let Some(parent) = p.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(presets) {
+            let _ = std::fs::write(&p, json);
+        }
+    }
+
+    fn refresh_presets_ui(ui_w: &slint::Weak<MainWindow>, state_arc: &Arc<Mutex<SkinViewState>>) {
+        let presets = load_skin_presets();
+        let cape_textures = {
+            let st = state_arc.lock().unwrap();
+            st.cape_textures.clone()
+        };
+
+        struct RawPresetItem {
+            id: String,
+            name: String,
+            variant: String,
+            cape_id: String,
+            cape_alias: String,
+            date_str: String,
+            skin_buf: Option<SharedPixelBuffer<Rgba8Pixel>>,
+            cape_buf: Option<SharedPixelBuffer<Rgba8Pixel>>,
+        }
+
+        let mut raw_items = Vec::new();
+        let p_dir = presets_dir();
+
+        for pr in presets {
+            let skin_path = p_dir.join(&pr.skin_file);
+            let skin_buf = if let Ok(bytes) = std::fs::read(&skin_path) {
+                extract_head_from_skin(&bytes, 32)
+            } else {
+                None
+            };
+
+            let cape_buf = if !pr.cape_id.is_empty() {
+                cape_textures.get(&pr.cape_id).and_then(extract_cape_icon)
+            } else {
+                None
+            };
+
+            raw_items.push(RawPresetItem {
+                id: pr.id,
+                name: pr.name,
+                variant: pr.variant,
+                cape_id: pr.cape_id,
+                cape_alias: pr.cape_alias,
+                date_str: pr.date_str,
+                skin_buf,
+                cape_buf,
+            });
+        }
+
+        let _ = ui_w.upgrade_in_event_loop(move |ui| {
+            let items: Vec<SkinPresetData> = raw_items
+                .into_iter()
+                .map(|pr| {
+                    let has_skin_icon = pr.skin_buf.is_some();
+                    let skin_icon = pr.skin_buf.map(Image::from_rgba8).unwrap_or_default();
+                    let has_cape_icon = pr.cape_buf.is_some();
+                    let cape_icon = pr.cape_buf.map(Image::from_rgba8).unwrap_or_default();
+                    SkinPresetData {
+                        id: pr.id.into(),
+                        name: pr.name.into(),
+                        variant: pr.variant.into(),
+                        cape_id: pr.cape_id.into(),
+                        cape_alias: pr.cape_alias.into(),
+                        date_str: pr.date_str.into(),
+                        skin_icon,
+                        has_skin_icon,
+                        cape_icon,
+                        has_cape_icon,
+                    }
+                })
+                .collect();
+            ui.set_skin_presets(ModelRc::new(VecModel::from(items)));
+        });
+    }
+
     fn update_character_preview(ui_w: &slint::Weak<MainWindow>, state: &SkinViewState) {
         let buf = character_renderer::render_minecraft_character(
             290,
@@ -1099,8 +1224,11 @@ async fn main() -> Result<()> {
         selected_skin_path: String::new(),
         selected_skin_bytes: None,
         active_variant: "CLASSIC".to_string(),
+        staged_variant: "CLASSIC".to_string(),
         active_cape_id: String::new(),
+        staged_cape_id: String::new(),
         capes: Vec::new(),
+        cape_textures: HashMap::new(),
     }));
 
     {
@@ -1128,6 +1256,8 @@ async fn main() -> Result<()> {
                 }
                 return;
             };
+
+            refresh_presets_ui(&ui_w, &state_arc);
 
             if let Some(ui) = ui_w.upgrade() {
                 ui.set_skin_open(true);
@@ -1159,26 +1289,41 @@ async fn main() -> Result<()> {
                             }
                         }
 
+                        struct RawCapeItem {
+                            id: String,
+                            alias: String,
+                            is_active: bool,
+                            icon: Option<SharedPixelBuffer<Rgba8Pixel>>,
+                        }
+
                         let mut active_cid = String::new();
                         let mut downloaded_cape = None;
                         let mut cape_items = Vec::new();
+                        let mut textures_map = HashMap::new();
 
                         for c in &details.capes {
                             let is_act = c.state.eq_ignore_ascii_case("ACTIVE");
-                            if is_act {
-                                active_cid = c.id.clone();
-                                if let Ok(resp) = client.get(&c.url).send().await {
-                                    if let Ok(bytes) = resp.bytes().await {
-                                        if let Ok(dyn_img) = image::load_from_memory(&bytes) {
-                                            downloaded_cape = Some(dyn_img.to_rgba8());
+                            let mut cape_icon_buf = None;
+
+                            if let Ok(resp) = client.get(&c.url).send().await {
+                                if let Ok(bytes) = resp.bytes().await {
+                                    if let Ok(dyn_img) = image::load_from_memory(&bytes) {
+                                        let rgba = dyn_img.to_rgba8();
+                                        cape_icon_buf = extract_cape_icon(&rgba);
+                                        if is_act {
+                                            active_cid = c.id.clone();
+                                            downloaded_cape = Some(rgba.clone());
                                         }
+                                        textures_map.insert(c.id.clone(), rgba);
                                     }
                                 }
                             }
-                            cape_items.push(CapeData {
-                                id: c.id.clone().into(),
-                                alias: c.alias.clone().into(),
+
+                            cape_items.push(RawCapeItem {
+                                id: c.id.clone(),
+                                alias: c.alias.clone(),
                                 is_active: is_act,
+                                icon: cape_icon_buf,
                             });
                         }
 
@@ -1189,24 +1334,47 @@ async fn main() -> Result<()> {
                             }
                             st.cape_image = downloaded_cape;
                             st.active_variant = skin_variant.clone();
+                            st.staged_variant = skin_variant.clone();
                             st.scene.model = match skin_variant.as_str() {
                                 "SLIM" => ArmModel::Slim,
                                 _ => ArmModel::Classic,
                             };
                             st.active_cape_id = active_cid.clone();
+                            st.staged_cape_id = active_cid.clone();
                             st.capes = details.capes;
+                            st.cape_textures = textures_map;
                             st.selected_skin_path.clear();
                             st.selected_skin_bytes = None;
                             update_character_preview(&ui_w, &st);
                         }
 
+                        let skin_variant_c = skin_variant.clone();
+                        let active_cid_c = active_cid.clone();
                         let _ = ui_w.upgrade_in_event_loop(move |ui| {
+                            let ui_capes: Vec<CapeData> = cape_items
+                                .into_iter()
+                                .map(|c| {
+                                    let has_icon = c.icon.is_some();
+                                    let icon = c.icon.map(Image::from_rgba8).unwrap_or_default();
+                                    CapeData {
+                                        id: c.id.into(),
+                                        alias: c.alias.into(),
+                                        is_active: c.is_active,
+                                        icon,
+                                        has_icon,
+                                    }
+                                })
+                                .collect();
                             ui.set_skin_active_variant(skin_variant.into());
-                            ui.set_skin_capes(ModelRc::new(VecModel::from(cape_items)));
+                            ui.set_skin_staged_variant(skin_variant_c.into());
+                            ui.set_skin_capes(ModelRc::new(VecModel::from(ui_capes)));
                             ui.set_skin_active_cape_id(active_cid.into());
+                            ui.set_skin_staged_cape_id(active_cid_c.into());
                             ui.set_skin_selected_path("".into());
                             ui.set_skin_status("".into());
                         });
+
+                        refresh_presets_ui(&ui_w, &state_arc);
                     }
                     Err(e) => {
                         let err_msg = e.to_string();
@@ -1225,7 +1393,8 @@ async fn main() -> Result<()> {
         main_window.on_skin_rotate(move |dx, dy| {
             let mut st = state_arc.lock().unwrap();
             st.scene.yaw += dx * 0.015;
-            st.scene.pitch = (st.scene.pitch - dy * 0.015).clamp(-0.8, 0.8);
+            // Dragging down tilts character up; pitch control now non-inverted
+            st.scene.pitch = (st.scene.pitch + dy * 0.015).clamp(-0.8, 0.8);
             update_character_preview(&ui_w, &st);
         });
     }
@@ -1247,14 +1416,14 @@ async fn main() -> Result<()> {
         main_window.on_skin_set_variant(move |v| {
             let v_str = v.to_string();
             let mut st = state_arc.lock().unwrap();
-            st.active_variant = v_str.clone();
+            st.staged_variant = v_str.clone();
             st.scene.model = match v_str.as_str() {
                 "SLIM" => ArmModel::Slim,
                 _ => ArmModel::Classic,
             };
             update_character_preview(&ui_w, &st);
             if let Some(ui) = ui_w.upgrade() {
-                ui.set_skin_active_variant(v);
+                ui.set_skin_staged_variant(v);
             }
         });
     }
@@ -1283,7 +1452,7 @@ async fn main() -> Result<()> {
                         if let Some(ui) = ui_w.upgrade() {
                             ui.set_skin_selected_path(path_name.into());
                             ui.set_skin_status(
-                                "Local skin previewed. Click 'UPLOAD SKIN' to apply.".into(),
+                                "Local skin loaded. Click 'SAVE & APPLY TO MOJANG' to equip.".into(),
                             );
                         }
                     }
@@ -1294,23 +1463,44 @@ async fn main() -> Result<()> {
 
     {
         let ui_w = ui_handle.clone();
+        let state_arc = skin_state.clone();
+        main_window.on_skin_select_cape(move |cape_id| {
+            let cid = cape_id.to_string();
+            let mut st = state_arc.lock().unwrap();
+            st.staged_cape_id = cid.clone();
+            st.cape_image = if cid.is_empty() {
+                None
+            } else {
+                st.cape_textures.get(&cid).cloned()
+            };
+            update_character_preview(&ui_w, &st);
+            if let Some(ui) = ui_w.upgrade() {
+                ui.set_skin_staged_cape_id(cid.into());
+            }
+        });
+    }
+
+    {
+        let ui_w = ui_handle.clone();
         let cfg_arc = config.clone();
         let client = http_client.clone();
         let state_arc = skin_state.clone();
-        main_window.on_skin_upload(move || {
+        main_window.on_skin_save_to_mojang(move || {
             let ui_w = ui_w.clone();
             let cfg_arc = cfg_arc.clone();
             let client = client.clone();
             let state_arc = state_arc.clone();
 
-            let (bytes_opt, variant) = {
+            let (skin_bytes, variant, staged_cape, active_cape) = {
                 let st = state_arc.lock().unwrap();
-                (st.selected_skin_bytes.clone(), st.active_variant.clone())
+                (
+                    st.selected_skin_bytes.clone(),
+                    st.staged_variant.clone(),
+                    st.staged_cape_id.clone(),
+                    st.active_cape_id.clone(),
+                )
             };
 
-            let Some(bytes) = bytes_opt else {
-                return;
-            };
             let acc_opt = {
                 let cfg = cfg_arc.lock().unwrap();
                 cfg.account.clone()
@@ -1320,30 +1510,57 @@ async fn main() -> Result<()> {
             };
 
             if let Some(ui) = ui_w.upgrade() {
-                ui.set_skin_is_uploading(true);
-                ui.set_skin_status("Uploading skin to Minecraft Services...".into());
+                ui.set_skin_is_saving(true);
+                ui.set_skin_status("Applying changes to Mojang...".into());
             }
 
             tokio::spawn(async move {
-                match auth::upload_player_skin(&client, &acc.access_token, &bytes, &variant).await {
-                    Ok(_) => {
-                        let _ = ui_w.upgrade_in_event_loop(|ui| {
-                            ui.set_skin_is_uploading(false);
-                            ui.set_skin_status("✓ Skin uploaded and applied successfully!".into());
-                            ui.set_skin_selected_path("".into());
-                            ui.set_status_banner_type("info".into());
-                            ui.set_status_banner_text(
-                                "Minecraft skin updated successfully.".into(),
-                            );
-                        });
+                let mut errors = Vec::new();
+
+                // 1. Upload skin if new skin was selected
+                if let Some(bytes) = skin_bytes {
+                    if let Err(e) = auth::upload_player_skin(&client, &acc.access_token, &bytes, &variant).await {
+                        errors.push(format!("Skin: {}", e));
                     }
-                    Err(e) => {
-                        let err_msg = e.to_string();
-                        let _ = ui_w.upgrade_in_event_loop(move |ui| {
-                            ui.set_skin_is_uploading(false);
-                            ui.set_skin_status(format!("Upload failed: {}", err_msg).into());
-                        });
+                }
+
+                // 2. Set/Unequip cape if changed
+                if staged_cape != active_cape {
+                    let cid_opt = if staged_cape.is_empty() {
+                        None
+                    } else {
+                        Some(staged_cape.as_str())
+                    };
+                    if let Err(e) = auth::set_player_cape(&client, &acc.access_token, cid_opt).await {
+                        errors.push(format!("Cape: {}", e));
                     }
+                }
+
+                if errors.is_empty() {
+                    {
+                        let mut st = state_arc.lock().unwrap();
+                        st.active_variant = variant.clone();
+                        st.active_cape_id = staged_cape.clone();
+                        st.selected_skin_bytes = None;
+                        st.selected_skin_path.clear();
+                    }
+                    let staged_cape_c = staged_cape.clone();
+                    let variant_c = variant.clone();
+                    let _ = ui_w.upgrade_in_event_loop(move |ui| {
+                        ui.set_skin_is_saving(false);
+                        ui.set_skin_active_variant(variant_c.into());
+                        ui.set_skin_active_cape_id(staged_cape_c.into());
+                        ui.set_skin_selected_path("".into());
+                        ui.set_skin_status("✓ Successfully applied changes to Mojang!".into());
+                        ui.set_status_banner_type("info".into());
+                        ui.set_status_banner_text("Minecraft skin & cape updated successfully.".into());
+                    });
+                } else {
+                    let err_text = errors.join("; ");
+                    let _ = ui_w.upgrade_in_event_loop(move |ui| {
+                        ui.set_skin_is_saving(false);
+                        ui.set_skin_status(format!("Save failed: {}", err_text).into());
+                    });
                 }
             });
         });
@@ -1368,116 +1585,154 @@ async fn main() -> Result<()> {
                 return;
             };
 
+            if let Some(ui) = ui_w.upgrade() {
+                ui.set_skin_is_saving(true);
+                ui.set_skin_status("Resetting skin on Mojang...".into());
+            }
+
             tokio::spawn(async move {
-                if auth::reset_player_skin(&client, &acc.access_token)
-                    .await
-                    .is_ok()
+                match auth::reset_player_skin(&client, &acc.access_token).await {
+                    Ok(_) => {
+                        {
+                            let mut st = state_arc.lock().unwrap();
+                            st.skin_image = default_steve_skin();
+                            st.selected_skin_bytes = None;
+                            st.selected_skin_path.clear();
+                            update_character_preview(&ui_w, &st);
+                        }
+                        let _ = ui_w.upgrade_in_event_loop(|ui| {
+                            ui.set_skin_is_saving(false);
+                            ui.set_skin_status("✓ Skin reset to default on Mojang.".into());
+                            ui.set_skin_selected_path("".into());
+                        });
+                    }
+                    Err(e) => {
+                        let err_msg = e.to_string();
+                        let _ = ui_w.upgrade_in_event_loop(move |ui| {
+                            ui.set_skin_is_saving(false);
+                            ui.set_skin_status(format!("Reset failed: {}", err_msg).into());
+                        });
+                    }
+                }
+            });
+        });
+    }
+
+    {
+        let ui_w = ui_handle.clone();
+        let state_arc = skin_state.clone();
+        main_window.on_skin_save_preset(move |name_str| {
+            let name = name_str.trim().to_string();
+            if name.is_empty() {
+                return;
+            }
+            let (img, variant, cape_id, cape_alias) = {
+                let st = state_arc.lock().unwrap();
+                let alias = st
+                    .capes
+                    .iter()
+                    .find(|c| c.id == st.staged_cape_id)
+                    .map(|c| c.alias.clone())
+                    .unwrap_or_else(|| "None".to_string());
+                (
+                    st.skin_image.clone(),
+                    st.staged_variant.clone(),
+                    st.staged_cape_id.clone(),
+                    alias,
+                )
+            };
+
+            let p_dir = presets_dir();
+            let _ = std::fs::create_dir_all(&p_dir);
+            let preset_id = format!("{}_{}", Utc::now().timestamp_millis(), &name.replace(' ', "_"));
+            let file_name = format!("{}.png", preset_id);
+            let skin_save_path = p_dir.join(&file_name);
+            let _ = img.save_with_format(&skin_save_path, image::ImageFormat::Png);
+
+            let mut presets = load_skin_presets();
+            presets.push(SkinPresetItem {
+                id: preset_id,
+                name,
+                skin_file: file_name,
+                variant,
+                cape_id,
+                cape_alias,
+                date_str: Utc::now().format("%Y-%m-%d").to_string(),
+            });
+            save_skin_presets(&presets);
+            refresh_presets_ui(&ui_w, &state_arc);
+            if let Some(ui) = ui_w.upgrade() {
+                ui.set_skin_status("Preset saved successfully!".into());
+            }
+        });
+    }
+
+    {
+        let ui_w = ui_handle.clone();
+        let state_arc = skin_state.clone();
+        main_window.on_skin_load_preset(move |preset_id| {
+            let pid = preset_id.to_string();
+            let presets = load_skin_presets();
+            if let Some(found) = presets.into_iter().find(|p| p.id == pid) {
+                let skin_path = presets_dir().join(&found.skin_file);
+                let loaded_img = if let Ok(bytes) = std::fs::read(&skin_path) {
+                    image::load_from_memory(&bytes).ok().map(|d| d.to_rgba8())
+                } else {
+                    None
+                };
+
                 {
                     let mut st = state_arc.lock().unwrap();
-                    st.skin_image = default_steve_skin();
-                    st.selected_skin_bytes = None;
-                    st.selected_skin_path.clear();
-                    update_character_preview(&ui_w, &st);
-                    let _ = ui_w.upgrade_in_event_loop(|ui| {
-                        ui.set_skin_status("Skin reset to default.".into());
-                        ui.set_skin_selected_path("".into());
-                    });
-                }
-            });
-        });
-    }
-
-    {
-        let ui_w = ui_handle.clone();
-        let cfg_arc = config.clone();
-        let client = http_client.clone();
-        let state_arc = skin_state.clone();
-        main_window.on_skin_equip_cape(move |cape_id| {
-            let ui_w = ui_w.clone();
-            let cfg_arc = cfg_arc.clone();
-            let client = client.clone();
-            let state_arc = state_arc.clone();
-            let cid = cape_id.to_string();
-
-            let acc_opt = {
-                let cfg = cfg_arc.lock().unwrap();
-                cfg.account.clone()
-            };
-            let Some(acc) = acc_opt else {
-                return;
-            };
-
-            tokio::spawn(async move {
-                if auth::set_player_cape(&client, &acc.access_token, Some(&cid))
-                    .await
-                    .is_ok()
-                {
-                    let cape_url = {
-                        let st = state_arc.lock().unwrap();
-                        st.capes.iter().find(|c| c.id == cid).map(|c| c.url.clone())
+                    if let Some(img) = loaded_img {
+                        st.skin_image = img;
+                    }
+                    st.staged_variant = found.variant.clone();
+                    st.scene.model = match found.variant.as_str() {
+                        "SLIM" => ArmModel::Slim,
+                        _ => ArmModel::Classic,
                     };
-                    let mut new_cape_img = None;
-                    if let Some(url) = cape_url {
-                        if let Ok(resp) = client.get(&url).send().await {
-                            if let Ok(b) = resp.bytes().await {
-                                if let Ok(dyn_img) = image::load_from_memory(&b) {
-                                    new_cape_img = Some(dyn_img.to_rgba8());
-                                }
-                            }
-                        }
+                    st.staged_cape_id = found.cape_id.clone();
+                    st.cape_image = if found.cape_id.is_empty() {
+                        None
+                    } else {
+                        st.cape_textures.get(&found.cape_id).cloned()
+                    };
+                    st.selected_skin_path = found.name.clone();
+                    if let Ok(bytes) = std::fs::read(&skin_path) {
+                        st.selected_skin_bytes = Some(bytes);
                     }
-                    {
-                        let mut st = state_arc.lock().unwrap();
-                        st.active_cape_id = cid.clone();
-                        st.cape_image = new_cape_img;
-                        update_character_preview(&ui_w, &st);
-                    }
-                    let cid_c = cid.clone();
-                    let _ = ui_w.upgrade_in_event_loop(move |ui| {
-                        ui.set_skin_active_cape_id(cid_c.into());
-                        ui.set_skin_status("Cape equipped!".into());
-                    });
+                    update_character_preview(&ui_w, &st);
                 }
-            });
+
+                if let Some(ui) = ui_w.upgrade() {
+                    ui.set_skin_staged_variant(found.variant.into());
+                    ui.set_skin_staged_cape_id(found.cape_id.into());
+                    ui.set_skin_selected_path(format!("Preset: {}", found.name).into());
+                    ui.set_skin_status(
+                        format!(
+                            "Previewing preset '{}'. Inspect in 3D or click 'SAVE & APPLY TO MOJANG' to equip.",
+                            found.name
+                        )
+                        .into(),
+                    );
+                }
+            }
         });
     }
 
     {
         let ui_w = ui_handle.clone();
-        let cfg_arc = config.clone();
-        let client = http_client.clone();
         let state_arc = skin_state.clone();
-        main_window.on_skin_unequip_cape(move || {
-            let ui_w = ui_w.clone();
-            let cfg_arc = cfg_arc.clone();
-            let client = client.clone();
-            let state_arc = state_arc.clone();
-
-            let acc_opt = {
-                let cfg = cfg_arc.lock().unwrap();
-                cfg.account.clone()
-            };
-            let Some(acc) = acc_opt else {
-                return;
-            };
-
-            tokio::spawn(async move {
-                if auth::set_player_cape(&client, &acc.access_token, None)
-                    .await
-                    .is_ok()
-                {
-                    {
-                        let mut st = state_arc.lock().unwrap();
-                        st.active_cape_id.clear();
-                        st.cape_image = None;
-                        update_character_preview(&ui_w, &st);
-                    }
-                    let _ = ui_w.upgrade_in_event_loop(|ui| {
-                        ui.set_skin_active_cape_id("".into());
-                        ui.set_skin_status("Cape unequipped.".into());
-                    });
-                }
-            });
+        main_window.on_skin_delete_preset(move |preset_id| {
+            let pid = preset_id.to_string();
+            let mut presets = load_skin_presets();
+            if let Some(idx) = presets.iter().position(|p| p.id == pid) {
+                let removed = presets.remove(idx);
+                let skin_path = presets_dir().join(&removed.skin_file);
+                let _ = std::fs::remove_file(skin_path);
+                save_skin_presets(&presets);
+                refresh_presets_ui(&ui_w, &state_arc);
+            }
         });
     }
 
@@ -1994,7 +2249,6 @@ fn refresh_installed_mods(
                 continue;
             }
             if !needle.is_empty()
-                && !m.filename.to_lowercase().contains(&needle)
                 && !m.display_name.to_lowercase().contains(&needle)
                 && !m.mod_version.to_lowercase().contains(&needle)
             {

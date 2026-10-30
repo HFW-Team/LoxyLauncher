@@ -756,17 +756,77 @@ export component ModsDialog inherits Rectangle {
                 vertical-stretch: 1;
                 spacing: 8px;
 
-                // Filename Filter + Group Counter Bar
+                // Prominent Search Bar + Group Counter Bar
                 HorizontalLayout {
                     spacing: 10px;
-                    alignment: space-between;
+                    height: 34px;
 
-                    McTextInput {
+                    Rectangle {
                         horizontal-stretch: 1;
-                        box-height: 30px;
-                        text <=> root.installed-filter;
-                        placeholder: "Filter installed content by name...";
-                        edited(f) => { root.installed-filter-edited(f); }
+                        background: #141414;
+                        border-color: inst-filter-inp.has-focus ? #66bb6a : #3a3a3a;
+                        border-width: 1px;
+
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            spacing: 8px;
+
+                            Text {
+                                text: "🔍";
+                                font-size: 13px;
+                                vertical-alignment: center;
+                            }
+
+                            inst-filter-inp := TextInput {
+                                horizontal-stretch: 1;
+                                text <=> root.installed-filter;
+                                font-size: 12px;
+                                color: #ffffff;
+                                vertical-alignment: center;
+                                single-line: true;
+                                edited => { root.installed-filter-edited(self.text); }
+                            }
+
+                            if root.installed-filter != "" : VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 20px;
+                                    height: 20px;
+                                    background: clear-touch.has-hover ? #2e2e2e : transparent;
+                                    border-radius: 10px;
+
+                                    clear-touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            root.installed-filter = "";
+                                            root.installed-filter-edited("");
+                                        }
+                                    }
+
+                                    Text {
+                                        width: 100%;
+                                        height: 100%;
+                                        text: "✕";
+                                        font-size: 12px;
+                                        font-weight: 700;
+                                        color: clear-touch.has-hover ? #ffffff : #aaaaaa;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+
+                        if root.installed-filter == "" : Text {
+                            x: 32px;
+                            y: 0px;
+                            height: parent.height;
+                            text: "Search installed mods by name or version...";
+                            color: #777777;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
                     }
 
                     VerticalLayout {
@@ -774,6 +834,7 @@ export component ModsDialog inherits Rectangle {
                         Text {
                             text: root.user-mods.length + " User • " + root.pack-mods.length + " Modpack";
                             font-size: 11px;
+                            font-weight: 700;
                             color: #999999;
                         }
                     }
@@ -959,7 +1020,7 @@ export component ModsDialog inherits Rectangle {
                                                     horizontal-stretch: 1;
 
                                                     HorizontalLayout {
-                                                        spacing: 8px;
+                                                        spacing: 6px;
                                                         alignment: start;
 
                                                         Text {
@@ -980,7 +1041,20 @@ export component ModsDialog inherits Rectangle {
                                                                 font-size: 9px;
                                                                 font-weight: 700;
                                                                 color: #81c784;
-                                                                horizontal-alignment: center;
+                                                                vertical-alignment: center;
+                                                            }
+                                                        }
+
+                                                        Rectangle {
+                                                            height: 16px;
+                                                            background: #1b5e20;
+                                                            border-color: #388e3c;
+                                                            border-width: 1px;
+                                                            Text {
+                                                                text: " USER ADDED ";
+                                                                font-size: 9px;
+                                                                font-weight: 700;
+                                                                color: #a5d6a7;
                                                                 vertical-alignment: center;
                                                             }
                                                         }
@@ -995,33 +1069,13 @@ export component ModsDialog inherits Rectangle {
                                                                 font-size: 8px;
                                                                 font-weight: 700;
                                                                 color: #90caf9;
-                                                                horizontal-alignment: center;
-                                                                vertical-alignment: center;
-                                                            }
-                                                        }
-
-                                                        Rectangle {
-                                                            width: 74px;
-                                                            height: 16px;
-                                                            background: #1b5e20;
-                                                            border-color: #388e3c;
-                                                            border-width: 1px;
-
-                                                            Text {
-                                                                width: 100%;
-                                                                height: 100%;
-                                                                text: "USER ADDED";
-                                                                font-size: 9px;
-                                                                font-weight: 700;
-                                                                color: #a5d6a7;
-                                                                horizontal-alignment: center;
                                                                 vertical-alignment: center;
                                                             }
                                                         }
                                                     }
 
                                                     HorizontalLayout {
-                                                        spacing: 8px;
+                                                        spacing: 6px;
                                                         alignment: start;
 
                                                         Text {
@@ -1043,6 +1097,7 @@ export component ModsDialog inherits Rectangle {
                                                     alignment: center;
                                                     HorizontalLayout {
                                                         spacing: 6px;
+                                                        alignment: end;
 
                                                         McButton {
                                                             text: mod.enabled ? "DISABLE" : "ENABLE";
@@ -1176,7 +1231,7 @@ export component ModsDialog inherits Rectangle {
                                                     horizontal-stretch: 1;
 
                                                     HorizontalLayout {
-                                                        spacing: 8px;
+                                                        spacing: 6px;
                                                         alignment: start;
 
                                                         Text {
@@ -1197,7 +1252,20 @@ export component ModsDialog inherits Rectangle {
                                                                 font-size: 9px;
                                                                 font-weight: 700;
                                                                 color: #90caf9;
-                                                                horizontal-alignment: center;
+                                                                vertical-alignment: center;
+                                                            }
+                                                        }
+
+                                                        Rectangle {
+                                                            height: 16px;
+                                                            background: #263238;
+                                                            border-color: #37474f;
+                                                            border-width: 1px;
+                                                            Text {
+                                                                text: " MODPACK ";
+                                                                font-size: 9px;
+                                                                font-weight: 700;
+                                                                color: #90caf9;
                                                                 vertical-alignment: center;
                                                             }
                                                         }
@@ -1212,33 +1280,13 @@ export component ModsDialog inherits Rectangle {
                                                                 font-size: 8px;
                                                                 font-weight: 700;
                                                                 color: #90caf9;
-                                                                horizontal-alignment: center;
-                                                                vertical-alignment: center;
-                                                            }
-                                                        }
-
-                                                        Rectangle {
-                                                            width: 66px;
-                                                            height: 16px;
-                                                            background: #263238;
-                                                            border-color: #37474f;
-                                                            border-width: 1px;
-
-                                                            Text {
-                                                                width: 100%;
-                                                                height: 100%;
-                                                                text: "MODPACK";
-                                                                font-size: 9px;
-                                                                font-weight: 700;
-                                                                color: #90caf9;
-                                                                horizontal-alignment: center;
                                                                 vertical-alignment: center;
                                                             }
                                                         }
                                                     }
 
                                                     HorizontalLayout {
-                                                        spacing: 8px;
+                                                        spacing: 6px;
                                                         alignment: start;
 
                                                         Text {
@@ -1260,6 +1308,7 @@ export component ModsDialog inherits Rectangle {
                                                     alignment: center;
                                                     HorizontalLayout {
                                                         spacing: 6px;
+                                                        alignment: end;
 
                                                         McButton {
                                                             text: mod.enabled ? "DISABLE" : "ENABLE";
